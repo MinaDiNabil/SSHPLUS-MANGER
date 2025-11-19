@@ -308,7 +308,7 @@ SCOLOR='\033[0m'
 				install_wireguard
 				;;
 			3 | 03)
-				v2raymanager
+				bash /root/SSHPLUS-MANGER/Modulos/v2raymanager
 				exit
 				;;
 			4 | 04)
@@ -321,7 +321,7 @@ SCOLOR='\033[0m'
 				install_hysteria2
 				;;
 			7 | 07)
-				trojan-go
+				bash /root/SSHPLUS-MANGER/Modulos/trojan-go
 				;;
 			8 | 08)
 				install_websocket
@@ -364,7 +364,7 @@ SCOLOR='\033[0m'
 				sleep 2
 				;;
 			18 | 18)
-				menu
+				/bin/menu
 				;;
 			0 | 00)
 				echo -e "\033[1;31mExiting...\033[0m"
