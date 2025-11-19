@@ -43,18 +43,18 @@ Perfect for VPS administrators who need a unified interface to manage multiple t
 
 ### For x86_64 Architecture:
 ```bash
-apt update -y && apt upgrade -y && wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/master/Plus && chmod 777 Plus && ./Plus
+apt update -y && apt upgrade -y && wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Plus && chmod 777 Plus && ./Plus
 ```
 
 ### For ARM Architecture (aarch64):
 ```bash
-apt update -y && apt upgrade -y && wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/master/Plus && chmod 777 Plus && ./Plus
+apt update -y && apt upgrade -y && wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Plus && chmod 777 Plus && ./Plus
 ```
 *Select option [2] for ARM architecture during installation*
 
 ### Access Root (Optional):
 ```bash
-wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/master/senharoot.sh && chmod 777 senharoot.sh && ./senharoot.sh
+wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/senharoot.sh && chmod 777 senharoot.sh && ./senharoot.sh
 ```
 
 ## 📋 Main Commands
