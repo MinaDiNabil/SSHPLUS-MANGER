@@ -213,11 +213,71 @@ if [[ "$resposta" = '1' ]]; then
     fun_bar "$_Ink/list $_lnk $_Ink $_1nk $key"
     clear
     echo ""
-    cd $HOME
+    echo -e "\033[1;32m════════════════════════════════════════════════════\033[0m"
     echo -e "        \033[1;33m • \033[1;32mINSTALACAO CONCLUIDA\033[1;33m • \033[0m"
+    echo -e "\033[1;32m════════════════════════════════════════════════════\033[0m"
+    echo ""
+    echo -e "\033[1;36mDeseja instalar protocolos adicionais agora?\033[0m"
+    echo ""
+    echo -e "\033[1;37m[\033[1;31m1\033[1;37m] \033[1;33mOpenVPN\033[0m"
+    echo -e "\033[1;37m[\033[1;31m2\033[1;37m] \033[1;33mWireGuard\033[0m"
+    echo -e "\033[1;37m[\033[1;31m3\033[1;37m] \033[1;33mShadowsocks\033[0m"
+    echo -e "\033[1;37m[\033[1;31m4\033[1;37m] \033[1;33mHysteria\033[0m"
+    echo -e "\033[1;37m[\033[1;31m5\033[1;37m] \033[1;33mInstalar Todos\033[0m"
+    echo -e "\033[1;37m[\033[1;31m0\033[1;37m] \033[1;33mPular (pode instalar depois)\033[0m"
+    echo ""
+    read -p "Selecione uma opção: " proto_option
+
+    case $proto_option in
+        1)
+            echo -e "\033[1;36mInstalando OpenVPN...\033[0m"
+            chmod +x $HOME/SSHPLUS-MANGER/Install/openvpn-install.sh 2>/dev/null
+            bash $HOME/SSHPLUS-MANGER/Install/openvpn-install.sh 2>/dev/null
+            ;;
+        2)
+            echo -e "\033[1;36mInstalando WireGuard...\033[0m"
+            chmod +x $HOME/SSHPLUS-MANGER/Install/wireguard-install.sh 2>/dev/null
+            bash $HOME/SSHPLUS-MANGER/Install/wireguard-install.sh 2>/dev/null
+            ;;
+        3)
+            echo -e "\033[1;36mInstalando Shadowsocks...\033[0m"
+            chmod +x $HOME/SSHPLUS-MANGER/Install/shadowsocks-install.sh 2>/dev/null
+            bash $HOME/SSHPLUS-MANGER/Install/shadowsocks-install.sh 2>/dev/null
+            ;;
+        4)
+            echo -e "\033[1;36mInstalando Hysteria...\033[0m"
+            chmod +x $HOME/SSHPLUS-MANGER/Install/hysteria-install.sh 2>/dev/null
+            bash $HOME/SSHPLUS-MANGER/Install/hysteria-install.sh 2>/dev/null
+            ;;
+        5)
+            echo -e "\033[1;36mInstalando todos os protocolos...\033[0m"
+            for script in openvpn-install.sh wireguard-install.sh shadowsocks-install.sh hysteria-install.sh; do
+                if [[ -f "$HOME/SSHPLUS-MANGER/Install/$script" ]]; then
+                    chmod +x "$HOME/SSHPLUS-MANGER/Install/$script"
+                    bash "$HOME/SSHPLUS-MANGER/Install/$script"
+                fi
+            done
+            ;;
+        0)
+            echo -e "\033[1;33mVocê pode instalar protocolos depois usando o comando: protocolmanager\033[0m"
+            sleep 2
+            ;;
+    esac
+
+    # Install protocol manager to bin
+    chmod +x $HOME/SSHPLUS-MANGER/Modulos/protocolmanager 2>/dev/null
+    cp $HOME/SSHPLUS-MANGER/Modulos/protocolmanager /bin/protocolmanager 2>/dev/null
+
+    clear
+    cd $HOME
+    echo -e "\033[1;32m════════════════════════════════════════════════════\033[0m"
+    echo -e "        \033[1;33m • \033[1;32mINSTALACAO CONCLUIDA\033[1;33m • \033[0m"
+    echo -e "\033[1;32m════════════════════════════════════════════════════\033[0m"
     echo ""
     echo -e "\033[1;31m \033[1;33mCOMANDO PRINCIPAL: \033[1;32mmenu\033[0m"
+    echo -e "\033[1;31m \033[1;33mGERENCIADOR DE PROTOCOLOS: \033[1;32mprotocolmanager\033[0m"
     echo -e "\033[1;33m MAIS INFORMACOES \033[1;31m(\033[1;36mTELEGRAM\033[1;31m): \033[1;37m@SSHPLUS\033[0m"
+    echo ""
     rm $HOME/Plus && cat /dev/null >~/.bash_history && history -c
 elif [[ "$resposta" = '2' ]]; then
     sed -i 's/Port 22222/Port 22/g' /etc/ssh/sshd_config >/dev/null 2>&1
@@ -324,11 +384,71 @@ elif [[ "$resposta" = '2' ]]; then
     fun_bar "$_Ink/listARM $_lnk $_Ink $_1nk $key"
     clear
     echo ""
-    cd $HOME
+    echo -e "\033[1;32m════════════════════════════════════════════════════\033[0m"
     echo -e "        \033[1;33m • \033[1;32mINSTALACAO CONCLUIDA\033[1;33m • \033[0m"
+    echo -e "\033[1;32m════════════════════════════════════════════════════\033[0m"
+    echo ""
+    echo -e "\033[1;36mDeseja instalar protocolos adicionais agora?\033[0m"
+    echo ""
+    echo -e "\033[1;37m[\033[1;31m1\033[1;37m] \033[1;33mOpenVPN\033[0m"
+    echo -e "\033[1;37m[\033[1;31m2\033[1;37m] \033[1;33mWireGuard\033[0m"
+    echo -e "\033[1;37m[\033[1;31m3\033[1;37m] \033[1;33mShadowsocks\033[0m"
+    echo -e "\033[1;37m[\033[1;31m4\033[1;37m] \033[1;33mHysteria\033[0m"
+    echo -e "\033[1;37m[\033[1;31m5\033[1;37m] \033[1;33mInstalar Todos\033[0m"
+    echo -e "\033[1;37m[\033[1;31m0\033[1;37m] \033[1;33mPular (pode instalar depois)\033[0m"
+    echo ""
+    read -p "Selecione uma opção: " proto_option
+
+    case $proto_option in
+        1)
+            echo -e "\033[1;36mInstalando OpenVPN...\033[0m"
+            chmod +x $HOME/SSHPLUS-MANGER/Install/openvpn-install.sh 2>/dev/null
+            bash $HOME/SSHPLUS-MANGER/Install/openvpn-install.sh 2>/dev/null
+            ;;
+        2)
+            echo -e "\033[1;36mInstalando WireGuard...\033[0m"
+            chmod +x $HOME/SSHPLUS-MANGER/Install/wireguard-install.sh 2>/dev/null
+            bash $HOME/SSHPLUS-MANGER/Install/wireguard-install.sh 2>/dev/null
+            ;;
+        3)
+            echo -e "\033[1;36mInstalando Shadowsocks...\033[0m"
+            chmod +x $HOME/SSHPLUS-MANGER/Install/shadowsocks-install.sh 2>/dev/null
+            bash $HOME/SSHPLUS-MANGER/Install/shadowsocks-install.sh 2>/dev/null
+            ;;
+        4)
+            echo -e "\033[1;36mInstalando Hysteria...\033[0m"
+            chmod +x $HOME/SSHPLUS-MANGER/Install/hysteria-install.sh 2>/dev/null
+            bash $HOME/SSHPLUS-MANGER/Install/hysteria-install.sh 2>/dev/null
+            ;;
+        5)
+            echo -e "\033[1;36mInstalando todos os protocolos...\033[0m"
+            for script in openvpn-install.sh wireguard-install.sh shadowsocks-install.sh hysteria-install.sh; do
+                if [[ -f "$HOME/SSHPLUS-MANGER/Install/$script" ]]; then
+                    chmod +x "$HOME/SSHPLUS-MANGER/Install/$script"
+                    bash "$HOME/SSHPLUS-MANGER/Install/$script"
+                fi
+            done
+            ;;
+        0)
+            echo -e "\033[1;33mVocê pode instalar protocolos depois usando o comando: protocolmanager\033[0m"
+            sleep 2
+            ;;
+    esac
+
+    # Install protocol manager to bin
+    chmod +x $HOME/SSHPLUS-MANGER/Modulos/protocolmanager 2>/dev/null
+    cp $HOME/SSHPLUS-MANGER/Modulos/protocolmanager /bin/protocolmanager 2>/dev/null
+
+    clear
+    cd $HOME
+    echo -e "\033[1;32m════════════════════════════════════════════════════\033[0m"
+    echo -e "        \033[1;33m • \033[1;32mINSTALACAO CONCLUIDA\033[1;33m • \033[0m"
+    echo -e "\033[1;32m════════════════════════════════════════════════════\033[0m"
     echo ""
     echo -e "\033[1;31m \033[1;33mCOMANDO PRINCIPAL: \033[1;32mmenu\033[0m"
+    echo -e "\033[1;31m \033[1;33mGERENCIADOR DE PROTOCOLOS: \033[1;32mprotocolmanager\033[0m"
     echo -e "\033[1;33m MAIS INFORMACOES \033[1;31m(\033[1;36mTELEGRAM\033[1;31m): \033[1;37m@SSHPLUS\033[0m"
+    echo ""
     rm $HOME/Plus && cat /dev/null >~/.bash_history && history -c
 
 else
