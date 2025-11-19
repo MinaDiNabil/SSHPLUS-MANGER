@@ -60,9 +60,9 @@ sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
 # Get server IP
 SERVER_IP=$(curl -s ifconfig.me)
 
-# Ask for ports
-read -p "Enter SSL port (default 443): " SSL_PORT
-SSL_PORT=${SSL_PORT:-443}
+# Set multiple SSL ports (default: 443 444 445 446)
+read -p "Enter SSL ports (default 443 444 445 446): " SSL_PORTS
+SSL_PORTS=${SSL_PORTS:-"443 444 445 446"}
 
 read -p "Enter Dropbear port to forward (default 22): " DROP_PORT
 DROP_PORT=${DROP_PORT:-22}
@@ -79,20 +79,29 @@ openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
 
 chmod 600 /etc/stunnel/stunnel.pem
 
-# Create stunnel configuration
+# Create stunnel configuration with multiple ports
+PORTS_ARRAY=($SSL_PORTS)
 cat > /etc/stunnel/stunnel.conf <<EOF
 ; Stunnel Configuration File
-; SSL Tunnel Service
+; SSL Tunnel Service - Multi-Port Configuration
 
 pid = /var/run/stunnel.pid
 cert = /etc/stunnel/stunnel.pem
 
-[dropbear]
-accept = $SSL_PORT
+[dropbear-1]
+accept = ${PORTS_ARRAY[0]:-443}
 connect = 127.0.0.1:$DROP_PORT
 
-[openssh]
-accept = 444
+[dropbear-2]
+accept = ${PORTS_ARRAY[1]:-444}
+connect = 127.0.0.1:$DROP_PORT
+
+[openssh-1]
+accept = ${PORTS_ARRAY[2]:-445}
+connect = 127.0.0.1:$OPENSSH_PORT
+
+[openssh-2]
+accept = ${PORTS_ARRAY[3]:-446}
 connect = 127.0.0.1:$OPENSSH_PORT
 
 [openvpn]
@@ -114,9 +123,10 @@ chmod +x /etc/stunnel/start.sh
 systemctl enable stunnel4
 systemctl restart stunnel4
 
-# Configure firewall
-ufw allow $SSL_PORT/tcp 2>/dev/null
-ufw allow 444/tcp 2>/dev/null
+# Configure firewall for all ports
+for port in $SSL_PORTS; do
+    ufw allow $port/tcp 2>/dev/null
+done
 ufw allow 587/tcp 2>/dev/null
 
 # Create status check script
@@ -130,19 +140,24 @@ echo ""
 echo -e "\033[1;36mActive Connections:\033[0m"
 netstat -tnp | grep stunnel
 echo ""
+echo -e "\033[1;36mConfigured Ports:\033[0m"
+grep "accept =" /etc/stunnel/stunnel.conf
+echo ""
 echo -e "\033[1;32m════════════════════════════════════════\033[0m"
 EOF
 
 chmod +x /usr/local/bin/ssl-status
 
+PORTS_ARRAY=($SSL_PORTS)
 echo ""
 echo -e "\033[1;32m════════════════════════════════════════\033[0m"
 echo -e "\033[1;32m SSL Tunnel installed successfully!\033[0m"
 echo -e "\033[1;32m════════════════════════════════════════\033[0m"
 echo -e "\033[1;33mServer IP: $SERVER_IP\033[0m"
-echo -e "\033[1;33mSSL Ports:\033[0m"
-echo -e "  - Dropbear SSL: $SSL_PORT"
-echo -e "  - OpenSSH SSL: 444"
+echo -e "\033[1;33mSSL Ports: $SSL_PORTS\033[0m"
+echo -e "\033[1;36mPort Configuration:\033[0m"
+echo -e "  - Dropbear SSL: ${PORTS_ARRAY[0]:-443}, ${PORTS_ARRAY[1]:-444}"
+echo -e "  - OpenSSH SSL: ${PORTS_ARRAY[2]:-445}, ${PORTS_ARRAY[3]:-446}"
 echo -e "  - OpenVPN SSL: 587"
 echo ""
 echo -e "\033[1;36mCheck status: ssl-status\033[0m"
