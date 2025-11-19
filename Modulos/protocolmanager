@@ -1,6 +1,7 @@
 #!/bin/bash
-# Protocol Manager for SSHPLUS Manager
-# Version: 1.0
+# Advanced Protocol Manager for SSHPLUS Manager
+# Version: 2.0
+# @MinaProNet
 
 clear
 [[ "$(whoami)" != "root" ]] && {
@@ -13,6 +14,7 @@ RED='\033[1;31m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[1;36m'
+PURPLE='\033[1;35m'
 NC='\033[0m' # No Color
 
 # Check protocol status
@@ -28,14 +30,29 @@ check_protocol_status() {
         "shadowsocks")
             systemctl is-active --quiet shadowsocks-libev && echo -e "${GREEN}●${NC}" || echo -e "${RED}○${NC}"
             ;;
-        "hysteria")
+        "hysteria1")
             systemctl is-active --quiet hysteria-server && echo -e "${GREEN}●${NC}" || echo -e "${RED}○${NC}"
+            ;;
+        "hysteria2")
+            systemctl is-active --quiet hysteria2-server && echo -e "${GREEN}●${NC}" || echo -e "${RED}○${NC}"
             ;;
         "v2ray")
             systemctl is-active --quiet v2ray && echo -e "${GREEN}●${NC}" || echo -e "${RED}○${NC}"
             ;;
         "trojan")
             systemctl is-active --quiet trojan && echo -e "${GREEN}●${NC}" || echo -e "${RED}○${NC}"
+            ;;
+        "websocket")
+            systemctl is-active --quiet ws-stunnel && echo -e "${GREEN}●${NC}" || echo -e "${RED}○${NC}"
+            ;;
+        "ssltunnel")
+            systemctl is-active --quiet stunnel4 && echo -e "${GREEN}●${NC}" || echo -e "${RED}○${NC}"
+            ;;
+        "slowdns")
+            systemctl is-active --quiet slowdns && echo -e "${GREEN}●${NC}" || echo -e "${RED}○${NC}"
+            ;;
+        "psiphon")
+            systemctl is-active --quiet psiphon && echo -e "${GREEN}●${NC}" || echo -e "${RED}○${NC}"
             ;;
     esac
 }
@@ -44,21 +61,34 @@ check_protocol_status() {
 show_menu() {
     clear
     echo -e "${GREEN}════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}      PROTOCOL MANAGER - SSHPLUS${NC}"
+    echo -e "${YELLOW}   PROTOCOL MANAGER - SSHPLUS v2.0${NC}"
+    echo -e "${PURPLE}           @MinaProNet${NC}"
     echo -e "${GREEN}════════════════════════════════════════${NC}"
     echo ""
     echo -e "${BLUE}Status: ${GREEN}●${NC} Running | ${RED}○${NC} Stopped"
     echo ""
+    echo -e "${YELLOW}═══ VPN Protocols ═══${NC}"
     echo -e "$(check_protocol_status openvpn) [1] OpenVPN"
     echo -e "$(check_protocol_status wireguard) [2] WireGuard"
-    echo -e "$(check_protocol_status shadowsocks) [3] Shadowsocks"
-    echo -e "$(check_protocol_status hysteria) [4] Hysteria"
-    echo -e "$(check_protocol_status v2ray) [5] V2Ray"
-    echo -e "$(check_protocol_status trojan) [6] Trojan-Go"
+    echo -e "$(check_protocol_status v2ray) [3] V2Ray"
     echo ""
-    echo -e "${YELLOW}[7]${NC} Install All Protocols"
-    echo -e "${YELLOW}[8]${NC} View All Protocol Status"
-    echo -e "${YELLOW}[0]${NC} Back to Main Menu"
+    echo -e "${YELLOW}═══ Proxy Protocols ═══${NC}"
+    echo -e "$(check_protocol_status shadowsocks) [4] Shadowsocks"
+    echo -e "$(check_protocol_status hysteria1) [5] Hysteria v1"
+    echo -e "$(check_protocol_status hysteria2) [6] Hysteria v2"
+    echo -e "$(check_protocol_status trojan) [7] Trojan-Go"
+    echo ""
+    echo -e "${YELLOW}═══ Tunnel Protocols ═══${NC}"
+    echo -e "$(check_protocol_status websocket) [8] WebSocket"
+    echo -e "$(check_protocol_status ssltunnel) [9] SSL Tunnel"
+    echo -e "$(check_protocol_status slowdns) [10] SlowDNS"
+    echo -e "$(check_protocol_status psiphon) [11] Psiphon"
+    echo ""
+    echo -e "${YELLOW}═══ Management ═══${NC}"
+    echo -e "[12] Install All Protocols"
+    echo -e "[13] View All Status"
+    echo -e "[14] Protocol Information"
+    echo -e "[0] Exit"
     echo ""
     echo -e "${GREEN}════════════════════════════════════════${NC}"
     echo -ne "${BLUE}Select option:${NC} "
@@ -82,6 +112,7 @@ install_protocol() {
 manage_protocol() {
     local protocol=$1
     local service=$2
+    local install_script=$3
 
     clear
     echo -e "${GREEN}════════════════════════════════════════${NC}"
@@ -89,13 +120,14 @@ manage_protocol() {
     echo -e "${GREEN}════════════════════════════════════════${NC}"
     echo ""
 
-    if systemctl is-active --quiet $service; then
+    if systemctl is-active --quiet $service 2>/dev/null; then
         echo -e "${GREEN}Status: Running${NC}"
         echo ""
         echo -e "[1] Stop $protocol"
         echo -e "[2] Restart $protocol"
         echo -e "[3] View logs"
-        echo -e "[4] Uninstall $protocol"
+        echo -e "[4] Show configuration"
+        echo -e "[5] Uninstall $protocol"
         echo -e "[0] Back"
         echo ""
         read -p "Select option: " opt
@@ -117,6 +149,21 @@ manage_protocol() {
                 read -p "Press Enter to continue..."
                 ;;
             4)
+                case $protocol in
+                    "OpenVPN") cat /etc/openvpn/server.conf 2>/dev/null ;;
+                    "WireGuard") cat /etc/wireguard/wg0.conf 2>/dev/null ;;
+                    "Shadowsocks") cat /etc/shadowsocks-libev/config.json 2>/dev/null ;;
+                    "Hysteria"*) cat /etc/hysteria*/config.* 2>/dev/null ;;
+                    "V2Ray") cat /usr/local/etc/v2ray/config.json 2>/dev/null ;;
+                    "WebSocket") cat /etc/websocket/ws-proxy.py 2>/dev/null ;;
+                    "SSL Tunnel") cat /etc/stunnel/stunnel.conf 2>/dev/null ;;
+                    "SlowDNS") slowdns-info 2>/dev/null ;;
+                    "Psiphon") cat /opt/psiphon/config.json 2>/dev/null ;;
+                esac
+                echo ""
+                read -p "Press Enter to continue..."
+                ;;
+            5)
                 read -p "Are you sure you want to uninstall? [y/N]: " confirm
                 if [[ $confirm =~ ^[Yy]$ ]]; then
                     systemctl stop $service
@@ -127,9 +174,9 @@ manage_protocol() {
                 ;;
         esac
     else
-        echo -e "${RED}Status: Stopped${NC}"
+        echo -e "${RED}Status: Stopped/Not Installed${NC}"
         echo ""
-        echo -e "[1] Start $protocol"
+        echo -e "[1] Start $protocol (if installed)"
         echo -e "[2] Install/Reinstall $protocol"
         echo -e "[0] Back"
         echo ""
@@ -137,25 +184,15 @@ manage_protocol() {
 
         case $opt in
             1)
-                systemctl start $service
-                echo -e "${GREEN}$protocol started${NC}"
+                systemctl start $service 2>/dev/null && {
+                    echo -e "${GREEN}$protocol started${NC}"
+                } || {
+                    echo -e "${RED}Failed to start. Maybe not installed?${NC}"
+                }
                 sleep 2
                 ;;
             2)
-                case $protocol in
-                    "OpenVPN")
-                        install_protocol "OpenVPN" "/home/user/SSHPLUS-MANGER/Install/openvpn-install.sh"
-                        ;;
-                    "WireGuard")
-                        install_protocol "WireGuard" "/home/user/SSHPLUS-MANGER/Install/wireguard-install.sh"
-                        ;;
-                    "Shadowsocks")
-                        install_protocol "Shadowsocks" "/home/user/SSHPLUS-MANGER/Install/shadowsocks-install.sh"
-                        ;;
-                    "Hysteria")
-                        install_protocol "Hysteria" "/home/user/SSHPLUS-MANGER/Install/hysteria-install.sh"
-                        ;;
-                esac
+                install_protocol "$protocol" "$install_script"
                 ;;
         esac
     fi
@@ -169,21 +206,61 @@ view_all_status() {
     echo -e "${GREEN}════════════════════════════════════════${NC}"
     echo ""
 
-    protocols=("openvpn@server:OpenVPN" "wg-quick@wg0:WireGuard" "shadowsocks-libev:Shadowsocks"
-               "hysteria-server:Hysteria" "v2ray:V2Ray" "trojan:Trojan-Go")
+    protocols=(
+        "openvpn@server:OpenVPN:1194"
+        "wg-quick@wg0:WireGuard:51820"
+        "shadowsocks-libev:Shadowsocks:8388"
+        "hysteria-server:Hysteria v1:36712"
+        "hysteria2-server:Hysteria v2:443"
+        "v2ray:V2Ray:10085"
+        "trojan:Trojan-Go:443"
+        "ws-stunnel:WebSocket:80"
+        "stunnel4:SSL Tunnel:443"
+        "slowdns:SlowDNS:53"
+        "psiphon:Psiphon:4443"
+    )
+
+    printf "%-20s %-15s %-10s\n" "Protocol" "Status" "Port"
+    echo -e "${GREEN}────────────────────────────────────────${NC}"
 
     for proto in "${protocols[@]}"; do
-        IFS=':' read -r service name <<< "$proto"
+        IFS=':' read -r service name port <<< "$proto"
         if systemctl is-active --quiet $service 2>/dev/null; then
             status="${GREEN}Running${NC}"
-            port=$(netstat -tlnp 2>/dev/null | grep -i "$name" | awk '{print $4}' | cut -d: -f2 | head -1)
         else
             status="${RED}Stopped${NC}"
-            port="-"
         fi
-        printf "%-20s %-15s Port: %s\n" "$name" "$(echo -e $status)" "$port"
+        printf "%-20s %-25s %-10s\n" "$name" "$(echo -e $status)" "$port"
     done
 
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════${NC}"
+    read -p "Press Enter to continue..."
+}
+
+# Protocol information
+protocol_info() {
+    clear
+    echo -e "${GREEN}════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}      Protocol Information${NC}"
+    echo -e "${GREEN}════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${BLUE}VPN Protocols:${NC}"
+    echo -e "  ${YELLOW}OpenVPN${NC}: Industry standard VPN, highly compatible"
+    echo -e "  ${YELLOW}WireGuard${NC}: Modern, fast, simple VPN protocol"
+    echo -e "  ${YELLOW}V2Ray${NC}: Advanced proxy with VMess/VLESS/Trojan"
+    echo ""
+    echo -e "${BLUE}Proxy Protocols:${NC}"
+    echo -e "  ${YELLOW}Shadowsocks${NC}: SOCKS5 proxy for bypassing censorship"
+    echo -e "  ${YELLOW}Hysteria v1${NC}: QUIC-based protocol for lossy networks"
+    echo -e "  ${YELLOW}Hysteria v2${NC}: Latest version with improved features"
+    echo -e "  ${YELLOW}Trojan-Go${NC}: Stealth proxy mimicking HTTPS traffic"
+    echo ""
+    echo -e "${BLUE}Tunnel Protocols:${NC}"
+    echo -e "  ${YELLOW}WebSocket${NC}: WebSocket-based tunnel for SSH/VPN"
+    echo -e "  ${YELLOW}SSL Tunnel${NC}: SSL/TLS tunnel (Stunnel)"
+    echo -e "  ${YELLOW}SlowDNS${NC}: DNS tunneling for restricted networks"
+    echo -e "  ${YELLOW}Psiphon${NC}: Multi-protocol tunnel with obfuscation"
     echo ""
     echo -e "${GREEN}════════════════════════════════════════${NC}"
     read -p "Press Enter to continue..."
@@ -202,17 +279,25 @@ install_all() {
         return
     fi
 
-    echo -e "${BLUE}Installing OpenVPN...${NC}"
-    install_protocol "OpenVPN" "/home/user/SSHPLUS-MANGER/Install/openvpn-install.sh"
+    scripts=(
+        "openvpn-install.sh:OpenVPN"
+        "wireguard-install.sh:WireGuard"
+        "shadowsocks-install.sh:Shadowsocks"
+        "hysteria1-install.sh:Hysteria v1"
+        "hysteria2-install.sh:Hysteria v2"
+        "v2ray-install.sh:V2Ray"
+        "websocket-install.sh:WebSocket"
+        "ssltunnel-install.sh:SSL Tunnel"
+        "slowdns-install.sh:SlowDNS"
+        "psiphon-install.sh:Psiphon"
+    )
 
-    echo -e "${BLUE}Installing WireGuard...${NC}"
-    install_protocol "WireGuard" "/home/user/SSHPLUS-MANGER/Install/wireguard-install.sh"
-
-    echo -e "${BLUE}Installing Shadowsocks...${NC}"
-    install_protocol "Shadowsocks" "/home/user/SSHPLUS-MANGER/Install/shadowsocks-install.sh"
-
-    echo -e "${BLUE}Installing Hysteria...${NC}"
-    install_protocol "Hysteria" "/home/user/SSHPLUS-MANGER/Install/hysteria-install.sh"
+    for script_info in "${scripts[@]}"; do
+        IFS=':' read -r script name <<< "$script_info"
+        echo -e "${BLUE}Installing $name...${NC}"
+        install_protocol "$name" "/root/SSHPLUS-MANGER/Install/$script"
+        sleep 1
+    done
 
     echo ""
     echo -e "${GREEN}All protocols installed!${NC}"
@@ -225,14 +310,20 @@ while true; do
     read option
 
     case $option in
-        1) manage_protocol "OpenVPN" "openvpn@server" ;;
-        2) manage_protocol "WireGuard" "wg-quick@wg0" ;;
-        3) manage_protocol "Shadowsocks" "shadowsocks-libev" ;;
-        4) manage_protocol "Hysteria" "hysteria-server" ;;
-        5) v2raymanager ;;
-        6) manage_protocol "Trojan-Go" "trojan" ;;
-        7) install_all ;;
-        8) view_all_status ;;
+        1) manage_protocol "OpenVPN" "openvpn@server" "/root/SSHPLUS-MANGER/Install/openvpn-install.sh" ;;
+        2) manage_protocol "WireGuard" "wg-quick@wg0" "/root/SSHPLUS-MANGER/Install/wireguard-install.sh" ;;
+        3) manage_protocol "V2Ray" "v2ray" "/root/SSHPLUS-MANGER/Install/v2ray-install.sh" ;;
+        4) manage_protocol "Shadowsocks" "shadowsocks-libev" "/root/SSHPLUS-MANGER/Install/shadowsocks-install.sh" ;;
+        5) manage_protocol "Hysteria v1" "hysteria-server" "/root/SSHPLUS-MANGER/Install/hysteria1-install.sh" ;;
+        6) manage_protocol "Hysteria v2" "hysteria2-server" "/root/SSHPLUS-MANGER/Install/hysteria2-install.sh" ;;
+        7) manage_protocol "Trojan-Go" "trojan" "/root/SSHPLUS-MANGER/Modulos/trojan-go" ;;
+        8) manage_protocol "WebSocket" "ws-stunnel" "/root/SSHPLUS-MANGER/Install/websocket-install.sh" ;;
+        9) manage_protocol "SSL Tunnel" "stunnel4" "/root/SSHPLUS-MANGER/Install/ssltunnel-install.sh" ;;
+        10) manage_protocol "SlowDNS" "slowdns" "/root/SSHPLUS-MANGER/Install/slowdns-install.sh" ;;
+        11) manage_protocol "Psiphon" "psiphon" "/root/SSHPLUS-MANGER/Install/psiphon-install.sh" ;;
+        12) install_all ;;
+        13) view_all_status ;;
+        14) protocol_info ;;
         0) clear; exit 0 ;;
         *) echo -e "${RED}Invalid option!${NC}"; sleep 1 ;;
     esac
