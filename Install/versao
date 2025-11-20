@@ -1,6 +1,9 @@
-VERSAO: 38
+VERSAO: 39
 
-ADICIONADO GERENCIADOR V2RAY
+ATUALIZADO PROTOCOLOS DE CONEXAO:
+- Easy-RSA 3.0.1 -> 3.2.4
+- Chisel -> v1.11.3
+- Corrigido referencias V2Ray
 
 @MinaProNet
 
