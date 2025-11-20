@@ -1,9 +1,15 @@
-VERSAO: 40
+VERSAO: 41
 
-ADICIONADO SUPORTE MULTI-PORTAS SSH:
-- Dropbear agora suporta multiplas portas
-- Opcao para adicionar/remover portas dinamicamente
-- OpenSSH ja tinha suporte (melhorado)
+ADICIONADO SUPORTE MULTI-PORTAS:
+- WEBSOCKET: multiplas portas simultaneas
+- SSL TUNNEL: multiplas portas simultaneas
+- Dropbear: multiplas portas simultaneas
+- OpenSSH: ja tinha suporte (melhorado)
+
+Cada protocolo agora pode rodar em varios portos:
+- Adicionar/remover portas dinamicamente
+- Gestao completa via menu
+- Suporte a configuracoes independentes
 
 ATUALIZADO PROTOCOLOS:
 - Easy-RSA 3.0.1 -> 3.2.4
