@@ -796,9 +796,9 @@ SCOLOR='\033[0m'
 				cd /etc/stunnel/
 				rm -rf stunnel.conf
 				rm -rf stunnel.pem
-				wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/master/Install/cert
-				wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/master/Install/key
-				wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/master/Install/stunnel
+				wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/cert
+				wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/key
+				wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/stunnel
 				mv cert cert.pem
 				mv key key.pem
 				mv stunnel stunnel.conf
