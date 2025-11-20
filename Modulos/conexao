@@ -617,8 +617,8 @@ SCOLOR='\033[0m'
 				echo -e "\n\033[1;32mCONFIGURANDO CHISEL !\033[0m"
 				echo ""
 				fun_inichisel() {
-					docker run --name chisel -p $porta:$porta -d --restart always jpillora/chisel server -p $porta --socks5 --key supersecret --auth "$username:$password"
-					docker.io run --name chisel -p $porta:$porta -d --restart always jpillora/chisel server -p $porta --socks5 --key supersecret --auth "$username:$password"
+					docker run --name chisel -p $porta:$porta -d --restart always jpillora/chisel:v1.11.3 server -p $porta --socks5 --key supersecret --auth "$username:$password"
+					docker.io run --name chisel -p $porta:$porta -d --restart always jpillora/chisel:v1.11.3 server -p $porta --socks5 --key supersecret --auth "$username:$password"
 				}
 				fun_bar 'fun_inichisel'
 				clear
@@ -1300,15 +1300,15 @@ SCOLOR='\033[0m'
 			# Adquirindo easy-rsa
 			echo ""
 			fun_dep() {
-				wget -O ~/EasyRSA-3.0.1.tgz "https://github.com/MinaDiNabil/SSHPLUS-MANGER/raw/main/Install/EasyRSA-3.0.1.tgz"
-				[[ ! -e $HOME/EasyRSA-3.0.1.tgz ]] && {
-					wget -O ~/EasyRSA-3.0.1.tgz "https://github.com/MinaDiNabil/SSHPLUS-MANGER/raw/main/Install/EasyRSA-3.0.1.tgz"
+				wget -O ~/EasyRSA-3.2.4.tgz "https://github.com/MinaDiNabil/SSHPLUS-MANGER/raw/main/Install/EasyRSA-3.2.4.tgz"
+				[[ ! -e $HOME/EasyRSA-3.2.4.tgz ]] && {
+					wget -O ~/EasyRSA-3.2.4.tgz "https://github.com/OpenVPN/easy-rsa/releases/download/v3.2.4/EasyRSA-3.2.4.tgz"
 				}
-				tar xzf ~/EasyRSA-3.0.1.tgz -C ~/
-				mv ~/EasyRSA-3.0.1/ /etc/openvpn/
-				mv /etc/openvpn/EasyRSA-3.0.1/ /etc/openvpn/easy-rsa/
+				tar xzf ~/EasyRSA-3.2.4.tgz -C ~/
+				mv ~/EasyRSA-3.2.4/ /etc/openvpn/
+				mv /etc/openvpn/EasyRSA-3.2.4/ /etc/openvpn/easy-rsa/
 				chown -R root:root /etc/openvpn/easy-rsa/
-				rm -rf ~/EasyRSA-3.0.1.tgz
+				rm -rf ~/EasyRSA-3.2.4.tgz
 				cd /etc/openvpn/easy-rsa/
 				./easyrsa init-pki
 				./easyrsa --batch build-ca nopass
