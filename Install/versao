@@ -1,5 +1,12 @@
-VERSAO: 41
+VERSAO: 42
 
+MELHORADO INSTALACAO SSL TUNNEL E WEBSOCKET:
+- Exibicao de portas SSH/Dropbear ativas durante instalacao
+- Validacao automatica de portas SSH disponiveis
+- Interface mais intuitiva com informacoes de portas ativas
+- Avisos quando porta selecionada nao esta ativa
+
+VERSAO ANTERIOR (41):
 ADICIONADO SUPORTE MULTI-PORTAS:
 - WEBSOCKET: multiplas portas simultaneas
 - SSL TUNNEL: multiplas portas simultaneas

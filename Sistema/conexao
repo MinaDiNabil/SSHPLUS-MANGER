@@ -709,12 +709,26 @@ SCOLOR='\033[0m'
 					inst_ssl
 				}
 				verif_ptrs $porta
-				echo -e "\n\033[1;32mTIPO DE CONEXAO PARA A NOVA PORTA:\033[0m"
-				echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;37m• \033[1;33mSSH (porta 22)\033[0m"
-				echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;37m• \033[1;33mWEBSOCKET (porta 80)\033[0m"
-				echo -ne "\033[1;32mESCOLHA \033[1;33m?\033[1;37m "
-				read tipo
-				[[ "$tipo" = '1' ]] && portssl='22' || portssl='80'
+
+				# Get active SSH and Dropbear ports
+				ssh_ports=$(grep 'Port' /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2 | grep -v 'no' | xargs)
+				dropbear_main=$(grep 'DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d'=' -f2)
+				dropbear_extra=$(grep 'DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear 2>/dev/null | grep -oP '\-p \K[0-9]+' | xargs)
+				all_ssh_ports="$ssh_ports $dropbear_main $dropbear_extra"
+
+				echo -e "\n\033[1;33mPORTAS SSH/DROPBEAR ATIVAS:\033[0m"
+				[[ -n "$ssh_ports" ]] && echo -e "  \033[1;32mOpenSSH:\033[1;37m $ssh_ports"
+				[[ -n "$dropbear_main" ]] && echo -e "  \033[1;32mDropbear:\033[1;37m $dropbear_main $dropbear_extra"
+				[[ -n "$all_ssh_ports" ]] || echo -e "  \033[1;31mNenhuma porta SSH ativa encontrada!"
+				echo ""
+				echo -ne "\033[1;32mEnter an active SSH/DROPBEAR port\033[1;33m:\033[1;37m "
+				read portssl
+
+				[[ -z "$portssl" ]] && {
+					echo -e "\n\033[1;31mPorta invalida!"
+					sleep 2
+					inst_ssl
+				}
 				echo -e "\n\033[1;32mADICIONANDO PORTA AO SSL TUNNEL\033[0m"
 				echo ""
 				fun_addssl() {
@@ -788,27 +802,42 @@ SCOLOR='\033[0m'
 			clear
 			echo -e "\E[44;1;37m              INSTALAR SSL TUNNEL               \E[0m"
 			echo ""
-			echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;37m• \033[1;33mINSTALAR SSL TUNNEL PADRÃO\033[0m"
-			echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;37m• \033[1;33mINSTALAR SSL TUNNEL WEBSOCKET\033[0m"
-			echo -e "\033[1;31m[\033[1;36m0\033[1;31m] \033[1;37m• \033[1;33mBACK\033[0m"
+			# Get active SSH and Dropbear ports
+			ssh_ports=$(grep 'Port' /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2 | grep -v 'no' | xargs)
+			dropbear_main=$(grep 'DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d'=' -f2)
+			dropbear_extra=$(grep 'DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear 2>/dev/null | grep -oP '\-p \K[0-9]+' | xargs)
+			all_ssh_ports="$ssh_ports $dropbear_main $dropbear_extra"
+
+			echo -e "\033[1;33mPORTAS SSH/DROPBEAR ATIVAS:\033[0m"
+			[[ -n "$ssh_ports" ]] && echo -e "  \033[1;32mOpenSSH:\033[1;37m $ssh_ports"
+			[[ -n "$dropbear_main" ]] && echo -e "  \033[1;32mDropbear:\033[1;37m $dropbear_main $dropbear_extra"
 			echo ""
-			echo -ne "\033[1;32mWHAT DO YOU WANT TO DO \033[1;33m?\033[1;37m "
-			read resposta
+			echo -e "\033[1;33mINFORMACAO:\033[0m"
+			echo -e "  SSL TUNNEL ira encapsular a conexao SSH/DROPBEAR"
+			echo -e "  Voce precisa escolher uma porta SSH ativa para conectar"
 			echo ""
-            if [[ "$resposta" = '1' ]]; then
-                portssl='22'
-            elif [[ "$resposta" = '2' ]]; then     
-                portssl='80'
-            elif [[ "$resposta" = '0' ]]; then
-				echo -e "\033[1;31mRetornando...\033[0m"
-				sleep 3
-				fun_conexao
-            else
-			echo ""
-			echo -e "\033[1;31mOpcao invalida !\033[0m"
-			sleep 1
-			inst_ssl
-		fi
+			echo -ne "\033[1;32mEnter an active SSH/DROPBEAR port\033[1;33m:\033[1;37m "
+			read portssl
+
+			# Validate port
+			[[ -z "$portssl" ]] && {
+				echo -e "\n\033[1;31mPorta invalida!"
+				sleep 2
+				inst_ssl
+			}
+
+			# Check if port is in the active list
+			port_found=0
+			for p in $all_ssh_ports; do
+				[[ "$p" = "$portssl" ]] && port_found=1
+			done
+
+			if [[ $port_found -eq 0 ]]; then
+				echo -e "\n\033[1;33m[\033[1;31m!\033[1;33m] AVISO: Porta $portssl nao esta na lista de portas ativas"
+				echo -ne "\033[1;32mDeseja continuar mesmo assim \033[1;31m? \033[1;33m[s/n]:\033[1;37m "
+				read confirma
+				[[ "$confirma" != "s" ]] && inst_ssl
+			fi
             clear
 			echo -e "\E[44;1;37m           INSTALADOR SSL TUNNEL             \E[0m"
 			echo -e "\n\033[1;33mVC ESTA PRESTES A INSTALAR O SSL TUNNEL !\033[0m"
@@ -1646,6 +1675,18 @@ exit 0' >$RCLOCAL
 				clear
 				echo -e "\E[44;1;37m         ADICIONAR PORTA WEBSOCKET         \E[0m"
 				echo ""
+
+				# Show active SSH/Dropbear ports as reference
+				ssh_ports=$(grep 'Port' /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2 | grep -v 'no' | xargs)
+				dropbear_main=$(grep 'DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d'=' -f2)
+				dropbear_extra=$(grep 'DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear 2>/dev/null | grep -oP '\-p \K[0-9]+' | xargs)
+
+				echo -e "\033[1;33mINFO - PORTAS SSH/DROPBEAR ATIVAS:\033[0m"
+				[[ -n "$ssh_ports" ]] && echo -e "  \033[1;32mOpenSSH:\033[1;37m $ssh_ports"
+				[[ -n "$dropbear_main" ]] && echo -e "  \033[1;32mDropbear:\033[1;37m $dropbear_main $dropbear_extra"
+				echo -e "\033[1;33mNOTA:\033[0m WEBSOCKET ira se conectar a porta SSH 22 por padrao"
+				echo ""
+
 				echo -ne "\033[1;32mQUAL PORTA DESEJA ADICIONAR \033[1;33m?\033[1;37m: "
 				read porta
 				[[ -z "$porta" ]] && {
