@@ -521,7 +521,7 @@ EOF
         systemctl restart tls-shunt-proxy && service_status_check tls-shunt-proxy
         judge "TLS-Shunt-Proxy application settings"
     else
-        echo -e "${Error} ${RedBG} A configuração TLS-Shunt-Proxy está anormal, reinstale e tente novamente ${Font}"
+        echo -e "${Error} ${RedBG} TLS-Shunt-Proxy configuration is abnormal, reinstall and try again ${Font}"
         exit 4
     fi
 }
@@ -678,7 +678,7 @@ tsp_sync() {
         judge "Shunt configuration synchronization"
         menu_req_check tls-shunt-proxy
     else
-        echo -e "${Error} ${RedBG} A configuração TLS-Shunt-Proxy está anormal, reinstale e tente novamente ${Font}"
+        echo -e "${Error} ${RedBG} TLS-Shunt-Proxy configuration is abnormal, reinstall and try again ${Font}"
         exit 4
     fi
 }
@@ -721,8 +721,8 @@ install_portainer() {
 
 install_tls_shunt_proxy() {
     check_system
-    systemctl is-active "firewalld" &>/dev/null && systemctl stop firewalld && echo -e "${OK} ${GreenBG} Firewalld está desligado ${Font}"
-    systemctl is-active "ufw" &>/dev/null && systemctl stop ufw && echo -e "${OK} ${GreenBG} UFW está fechado ${Font}"
+    systemctl is-active "firewalld" &>/dev/null && systemctl stop firewalld && echo -e "${OK} ${GreenBG} Firewalld is disabled ${Font}"
+    systemctl is-active "ufw" &>/dev/null && systemctl stop ufw && echo -e "${OK} ${GreenBG} UFW is closed ${Font}"
     dependency_install
     basic_optimization
     domain_port_check
@@ -917,9 +917,9 @@ deployed_status_check() {
         [[ $trojan_ws_mode = true ]] && tjwspath=$(grep '"path":' ${trojan_conf} | awk -F '"' '{print $4}') &&
             tjwshost=$(grep '"host":' ${trojan_conf} | awk -F '"' '{print $4}')
         [[ $trojan_tcp_mode = true && $tjport != "$trojan_tcp_port" ]] && echo -e "${Error} ${RedBG} Detected abnormality in Trojan-Go TCP port shunt configuration ${Font}" && tsp_config_stat="mismatched"
-        [[ $trojan_ws_mode = true && $tjport != "$trojan_ws_port" ]] && echo -e "${Error} ${RedBG} Detectada anormalidade de configuração de shunt de porta Trojan-Go WS ${Font}" && tsp_config_stat="mismatched"
+        [[ $trojan_ws_mode = true && $tjport != "$trojan_ws_port" ]] && echo -e "${Error} ${RedBG} Trojan-Go WS port shunt configuration abnormality detected ${Font}" && tsp_config_stat="mismatched"
         [[ $trojan_ws_mode = true && $tjwspath != "$trojan_ws_path" ]] && echo -e "${Error} ${RedBG} 检测到 Trojan-Go WS 路径分流配置异常 ${Font}" && tsp_config_stat="mismatched"
-        [[ $tsp_config_stat = "mismatched" ]] && echo -e "${Error} ${RedBG} Uma configuração de shunt inconsistente é detectada e tentará sincronizar e reparar automaticamente... ${Font}" && tsp_sync
+        [[ $tsp_config_stat = "mismatched" ]] && echo -e "${Error} ${RedBG} Inconsistent shunt configuration detected and will attempt to automatically synchronize and repair... ${Font}" && tsp_sync
     fi
 
     if [[ -f ${v2ray_conf} && $v2ray_stat = "installed" ]]; then
@@ -942,7 +942,7 @@ deployed_status_check() {
         [[ $v2ray_tcp_mode = v*ess && $v2port != "$v2ray_tcp_port" ]] && echo -e "${Error} ${RedBG} Detectada anormalidade de configuração de shunt da porta TCP V2Ray ${Font}" && tsp_config_stat="mismatched"
         [[ $v2ray_ws_mode = v*ess && $v2wsport != "$v2ray_ws_port" ]] && echo -e "${Error} ${RedBG} Anormalidade de configuração de shunt de porta V2Ray WS detectada ${Font}" && tsp_config_stat="mismatched"
         [[ $v2ray_ws_mode = v*ess && $v2wspath != "$v2ray_ws_path" ]] && echo -e "${Error} ${RedBG} Anormalidade de configuração de shunt de caminho V2Ray WS detectada ${Font}" && tsp_config_stat="mismatched"
-        [[ $tsp_config_stat = "mismatched" ]] && echo -e "${Error} ${RedBG} Uma configuração de shunt inconsistente é detectada e tentará sincronizar e reparar automaticamente... ${Font}" && tsp_sync
+        [[ $tsp_config_stat = "mismatched" ]] && echo -e "${Error} ${RedBG} Inconsistent shunt configuration detected and will attempt to automatically synchronize and repair... ${Font}" && tsp_sync
         if [[ $v2ray_tcp_mode = "vmess" || $v2ray_ws_mode = "vmess" ]]; then
             if [[ "${ID}" == "centos" ]]; then
                 systemctl is-active "chronyd" &>/dev/null || chrony_stat=inactive
@@ -950,12 +950,12 @@ deployed_status_check() {
                 systemctl is-active "chrony" &>/dev/null || chrony_stat=inactive
             fi
             if [[ $chrony_stat = inactive ]]; then
-                echo -e "${Error} ${RedBG} Foi detectado que o serviço de sincronização de tempo Chrony não foi iniciado. Se a hora do sistema for imprecisa, isso afetará seriamente a disponibilidade do protocolo V2Ray VMess ${Font}\n${WARN} ${Yellow} 当前系统时间: $(date)，请确认时间是否准确，误差范围±3分钟内（Y）或 尝试修复时间同步服务（R）[R]: ${Font}"
+                echo -e "${Error} ${RedBG} Detected that Chrony time synchronization service has not started. If the system time is inaccurate, this will seriously affect the availability of the V2Ray VMess protocol ${Font}\n${WARN} ${Yellow} Current system time: $(date), please confirm if the time is correct, error range ±3 minutes (Y) or try to fix the time synchronization service (R) [R]: ${Font}"
                 read -r chrony_confirm
                 [[ -z ${chrony_confirm} ]] && chrony_confirm="R"
                 case $chrony_confirm in
                 [rR])
-                    echo -e "${GreenBG} Instale o serviço de sincronização de tempo Chrony ${Font}"
+                    echo -e "${GreenBG} Install Chrony time synchronization service ${Font}"
                     check_system
                     chrony_install
                     ;;
@@ -967,9 +967,9 @@ deployed_status_check() {
 
     [[ -f ${trojan_conf} || -f ${v2ray_conf} || $trojan_stat = "installed" || $v2ray_stat = "installed" ]] && menu_req_check docker
     [[ $trojan_stat = "installed" && ! -f $trojan_conf ]] && echo -e "\n${Error} ${RedBG} Detected abnormality in Trojan-Go proxy configuration, the following options will be blocked, try to reinstall and repair and try again ... ${Font}" &&
-        echo -e "${WARN} ${Yellow}[Shield] Modificação da configuração do Trojan-Go${Font}"
+        echo -e "${WARN} ${Yellow}[Shield] Trojan-Go configuration modification${Font}"
     [[ $v2ray_stat = "installed" && ! -f $v2ray_conf ]] && echo -e "\n${Error} ${RedBG} Detected abnormality in V2Ray proxy configuration, the following options will be blocked, try to reinstall and try again... ${Font}" &&
-        echo -e "${WARN} ${Yellow}[Shield] Modificação da configuração V2Ray${Font}"
+        echo -e "${WARN} ${Yellow}[Shield] V2Ray configuration modification${Font}"
 
     if [[ $tsp_stat = "installed" && $tsp_template_version != "${tsp_cfg_version}" ]]; then
         echo -e "${WARN} ${Yellow}A critical TLS-Shunt-Proxy update was detected. To ensure the script runs normally, confirm to perform the update immediately（Y/N）[Y] ${Font}"
@@ -1016,7 +1016,7 @@ info_config() {
     fi
 
     if [[ -f ${v2ray_conf} && $v2ray_stat = "installed" ]]; then
-        echo -e "\n———————————————————— Configuração V2Ray ————————————————————" &&
+        echo -e "\n———————————————————— V2Ray Configuration ————————————————————" &&
             echo -e "$(docker exec V2Ray sh -c 'v2ray --version' 2>&1 | awk 'NR==1{gsub(/"/,"");print}')" &&
             echo -e "Server port: ${TSP_Port}" && echo -e "Server address: ${TSP_Domain}"
         [[ $v2ray_tcp_mode = "vmess" ]] && echo -e "\nVMess TCP UUID: ${VMTID}" &&
@@ -1084,7 +1084,7 @@ Disallow: /
 EOF
         subscribe_file="$(head -n 10 /dev/urandom | md5sum | head -c ${random_num})"
         subscribe_links | base64 -w 0 >"$(grep '#Website' ${tsp_conf} | sed -r 's/.*: (.*) #.*/\1/')"/subscribe"${subscribe_file}"
-        echo -e "Link de inscrição：\n https://${TSP_Domain}/subscribe${subscribe_file} \n${Yellow}Observação: O link de inscrição gerado pelo script contém todas as informações de configuração do protocolo proxy atualmente implantadas no servidor. Para considerações de segurança da informação, o endereço do link será atualizado aleatoriamente sempre que você visualizá-lo!！\nAlém disso, como diferentes clientes têm diferentes graus de compatibilidade e suporte para o protocolo de proxy, ajuste-se de acordo com a situação real！${Font}"
+        echo -e "Subscription link：\n https://${TSP_Domain}/subscribe${subscribe_file} \n${Yellow}Note: The subscription link generated by the script contains all proxy protocol configuration information currently deployed on the server. For information security considerations, the link address will be updated randomly each time you view it!\nAdditionally, as different clients have different degrees of compatibility and support for proxy protocols, adjust accordingly to the actual situation!${Font}"
         read -t 60 -n 1 -s -rp "Press any key to continue（60s）..."
     fi
 
@@ -1274,7 +1274,7 @@ menu() {
         ;;
     13)
         kernel_change="YES"
-        systemctl is-active "docker" &>/dev/null && echo -e "${RedBG} !!!Como o Docker está intimamente relacionado ao kernel do sistema, alterar o kernel do sistema pode fazer com que o Docker fique inutilizável!!! ${Font}\n${WARN} ${Yellow} 如果内核更换后 Docker 无法正常启动，请尝试通过 脚本 <选项10:升级 Docker> 修复 或 <选项11:完全卸载> 后重新部署 ${Font}" &&
+        systemctl is-active "docker" &>/dev/null && echo -e "${RedBG} !!!As Docker is closely related to the system kernel, changing the system kernel may make Docker unusable!!! ${Font}\n${WARN} ${Yellow} If Docker cannot start normally after kernel change, please try to fix through script <Option 10: Upgrade Docker> or <Option 11: Complete uninstallation> and redeploy ${Font}" &&
             read -rp "After confirming, type YES (case sensitive):" kernel_change
         [[ -z ${kernel_change} ]] && kernel_change="no"
         case $kernel_change in

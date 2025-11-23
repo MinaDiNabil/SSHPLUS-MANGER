@@ -107,12 +107,12 @@ echo -e "Key file found!"
 sleep 1
 echo ""
 key () {
-echo "Como deseja obter sua key?"
+echo "How do you want to get your key?"
 echo ""
-echo "[ 1 ] | Usar key existente no arquivo"
-echo "[ 2 ] | Deletar arquivo e gerar nova key"
-echo "[ 3 ] | Deletar arquivo e usar key padrão"
-echo "[ x ] | Abortar instalação"
+echo "[ 1 ] | Use existing key from file"
+echo "[ 2 ] | Delete file and generate new key"
+echo "[ 3 ] | Delete file and use default key"
+echo "[ x ] | Abort installation"
 echo ""
 echo -ne "Enter an option: " && read opcao
 case $opcao in
@@ -152,7 +152,7 @@ slowdns
 Opcao2 () {
 cd
 rm server.key server.pub
-echo "Gerando nova key"
+echo "Generating new key"
 cd /etc/slowdns/
 ./dns-server -gen-key -privkey-file /root/server.key -pubkey-file /root/server.pub
 echo -e "FINALIZANDO..."
@@ -179,13 +179,13 @@ read -p "Pressione [Enter] para voltar ao menu ou CTRL+C para sair"
 slowdns
 }
 Opcao3 () {
-echo -e "Baixando par de chaves padrão..."
+echo -e "Downloading default key pair..."
 cd
 rm server.key server.pub
 wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Slowdns/server.key
 wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Slowdns/server.pub
 sleep 1
-echo -e "Download Concluído"
+echo -e "Download completed"
 sleep 1
 cd /etc/slowdns/
 echo -e "FINALIZANDO..."
@@ -216,14 +216,14 @@ exit
 }
 key
 else
-echo -e "Não existe uma key nos registros"
+echo -e "No key exists in the records"
 echo ""
 key_gen () {
-echo "Como deseja obter sua key?"
+echo "How do you want to get your key?"
 echo ""
-echo "[ 1 ] | Gerar na instalação"
-echo "[ 2 ] | Usar a key padrão"
-echo "[ x ] | Abortar instalação"
+echo "[ 1 ] | Generate on installation"
+echo "[ 2 ] | Use the default key"
+echo "[ x ] | Abort installation"
 echo ""
 echo -ne "Enter an option: " && read opc_key
 case $opc_key in
@@ -234,7 +234,7 @@ x) opc_keyx ;;
 esac
 }
 opc_key1 () {
-echo "Gerando sua key..."
+echo "Generating your key..."
 cd /etc/slowdns/
 ./dns-server -gen-key -privkey-file /root/server.key -pubkey-file /root/server.pub
 echo -e "FINALIZANDO..."
@@ -261,12 +261,12 @@ read -p "Pressione [Enter] para voltar ao menu ou CTRL+C para sair"
 slowdns
 }
 opc_key2 () {
-echo -e "Baixando par de chaves padrão..."
+echo -e "Downloading default key pair..."
 cd
 wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Slowdns/server.key
 wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Slowdns/server.pub
 sleep 1
-echo -e "Download Concluído"
+echo -e "Download completed"
 sleep 1
 cd /etc/slowdns/
 echo -e "FINALIZANDO..."
@@ -293,7 +293,7 @@ read -p "Pressione [Enter] para voltar ao menu ou CTRL+C para sair"
 slowdns
 }
 opc_keyx () {
-echo "Abortando instalação"
+echo "Aborting installation"
 sleep 2
 slowdns
 }
