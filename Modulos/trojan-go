@@ -939,9 +939,9 @@ deployed_status_check() {
             v2wsport=$(jq -r '[.inbounds[] | select(.protocol=="vless") | select(.streamSettings.network=="ws") | .port][0]' ${v2ray_conf}) &&
             v2wspath=$(jq -r '[.inbounds[] | select(.protocol=="vless") | select(.streamSettings.network=="ws") | .streamSettings.wsSettings.path][0]' ${v2ray_conf}) &&
             VLWSID=$(jq -r '[.inbounds[] | select(.protocol=="vless") | select(.streamSettings.network=="ws") | .settings.clients[].id][0]' ${v2ray_conf})
-        [[ $v2ray_tcp_mode = v*ess && $v2port != "$v2ray_tcp_port" ]] && echo -e "${Error} ${RedBG} Detectada anormalidade de configuração de shunt da porta TCP V2Ray ${Font}" && tsp_config_stat="mismatched"
-        [[ $v2ray_ws_mode = v*ess && $v2wsport != "$v2ray_ws_port" ]] && echo -e "${Error} ${RedBG} Anormalidade de configuração de shunt de porta V2Ray WS detectada ${Font}" && tsp_config_stat="mismatched"
-        [[ $v2ray_ws_mode = v*ess && $v2wspath != "$v2ray_ws_path" ]] && echo -e "${Error} ${RedBG} Anormalidade de configuração de shunt de caminho V2Ray WS detectada ${Font}" && tsp_config_stat="mismatched"
+        [[ $v2ray_tcp_mode = v*ess && $v2port != "$v2ray_tcp_port" ]] && echo -e "${Error} ${RedBG} V2Ray TCP port shunt configuration abnormality detected ${Font}" && tsp_config_stat="mismatched"
+        [[ $v2ray_ws_mode = v*ess && $v2wsport != "$v2ray_ws_port" ]] && echo -e "${Error} ${RedBG} V2Ray WS port shunt configuration abnormality detected ${Font}" && tsp_config_stat="mismatched"
+        [[ $v2ray_ws_mode = v*ess && $v2wspath != "$v2ray_ws_path" ]] && echo -e "${Error} ${RedBG} V2Ray WS path shunt configuration abnormality detected ${Font}" && tsp_config_stat="mismatched"
         [[ $tsp_config_stat = "mismatched" ]] && echo -e "${Error} ${RedBG} Inconsistent shunt configuration detected and will attempt to automatically synchronize and repair... ${Font}" && tsp_sync
         if [[ $v2ray_tcp_mode = "vmess" || $v2ray_ws_mode = "vmess" ]]; then
             if [[ "${ID}" == "centos" ]]; then
