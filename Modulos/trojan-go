@@ -100,10 +100,10 @@ check_system() {
 
 is_root() {
     if [ 0 == $UID ]; then
-        echo -e "${OK} ${GreenBG} O usuário atual é o usuário root, continue a executar ${Font}"
+        echo -e "${OK} ${GreenBG} Current user is root user, continue execution ${Font}"
         sleep 1
     else
-        echo -e "${Error} ${RedBG} O usuário atual não é o usuário root, mude para o usuário root e execute novamente o script ${Font}"
+        echo -e "${Error} ${RedBG} Current user is not root user, switch to root user and run the script again ${Font}"
         exit 1
     fi
 }

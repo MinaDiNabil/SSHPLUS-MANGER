@@ -29,7 +29,7 @@ clear
 echo -e "\033[1;33mATENÇÃO AQUI POR FAVOR!\033[0m"
 echo ""
 echo -e "Ao fim do processo será necessário configurar"
-echo -e "novamente o serviço de SlowDNS, escolha a opção"
+echo -e "the SlowDNS service again, choose the option"
 echo -e "Usar key atual para restaurar sua antiga key"
 echo ""
 read -p "Pressione [ENTER] para continuar ou CTRL + C para cancelar"

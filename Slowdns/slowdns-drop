@@ -114,7 +114,7 @@ echo "[ 2 ] | Deletar arquivo e gerar nova key"
 echo "[ 3 ] | Deletar arquivo e usar key padrão"
 echo "[ x ] | Abortar instalação"
 echo ""
-echo -ne "Digite uma opção: " && read opcao
+echo -ne "Enter an option: " && read opcao
 case $opcao in
 1) Opcao1 ;;
 2) Opcao2 ;;
@@ -225,7 +225,7 @@ echo "[ 1 ] | Gerar na instalação"
 echo "[ 2 ] | Usar a key padrão"
 echo "[ x ] | Abortar instalação"
 echo ""
-echo -ne "Digite uma opção: " && read opc_key
+echo -ne "Enter an option: " && read opc_key
 case $opc_key in
 1) opc_key1 ;;
 2) opc_key2 ;;
