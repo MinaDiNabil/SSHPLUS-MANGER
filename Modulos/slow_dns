@@ -36,11 +36,11 @@ installslowdns() {
 }
 initslow() {
     [[ $(ss -lu | grep -wc '5300') != '0' ]] && {
-        echo -e "\n${RED}[${CYAN}1${RED}] ${YELLOW}PARAR O SLOWDNS${SCOLOR}"
-        echo -e "${RED}[${CYAN}2${RED}] ${YELLOW}REMOVER O SLOWDNS${SCOLOR}"
-        echo -e "${RED}[${CYAN}3${RED}] ${YELLOW}EXIBIR INFORMACOES${SCOLOR}"
-        echo -e "${RED}[${CYAN}0${RED}] ${YELLOW}VOLTAR${SCOLOR}"
-        echo -ne "\n${GREEN}INFORME UMA OPCAO${SCOLOR}: "
+        echo -e "\n${RED}[${CYAN}1${RED}] ${YELLOW}STOP SLOWDNS${SCOLOR}"
+        echo -e "${RED}[${CYAN}2${RED}] ${YELLOW}REMOVE SLOWDNS${SCOLOR}"
+        echo -e "${RED}[${CYAN}3${RED}] ${YELLOW}SHOW INFORMATION${SCOLOR}"
+        echo -e "${RED}[${CYAN}0${RED}] ${YELLOW}BACK${SCOLOR}"
+        echo -ne "\n${GREEN}SELECT AN OPTION${SCOLOR}: "
         read op
         if [[ "$op" == '1' ]]; then
             screen -r -S "slow_dns" -X quit >/dev/null 2>&1
