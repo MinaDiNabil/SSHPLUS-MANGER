@@ -1268,7 +1268,7 @@ SCOLOR='\033[0m'
 							fun_openvpn
 						fi
 						if [[ "$(grep -w "$host" /etc/hosts | wc -l)" -gt "0" ]]; then
-							echo -e "\E[41;1;37m    Esse host ja está adicionado  !    \E[0m"
+							echo -e "\E[41;1;37m    This host is already added!    \E[0m"
 							sleep 2
 							fun_openvpn
 						fi

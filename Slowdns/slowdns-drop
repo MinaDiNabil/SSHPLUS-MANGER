@@ -143,7 +143,7 @@ echo -ne "\033[1;33mSUA KEY:\033[0m " && cat /root/server.pub
 echo ""
 echo -ne "\033[1;33mCOMANDO TERMUX:\033[0m curl -sO https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/slowdns && chmod +x slowdns && ./slowdns " && cat /etc/slowdns/infons /root/server.pub
 echo ""
-echo -e "\033[1;33m SUA KEY está salva no arquivo /root/server.pub\033[0m"
+echo -e "\033[1;33m YOUR KEY is saved in file /root/server.pub\033[0m"
 echo -e "\033[1;33mGuarde-a em um local seguro, pode precisar no futuro!\033[0m"
 echo ""
 read -p "Pressione [Enter] para voltar ao menu ou CTRL+C para sair"
@@ -172,7 +172,7 @@ echo -ne "\033[1;33mSUA KEY:\033[0m " && cat /root/server.pub
 echo ""
 echo -ne "\033[1;33mCOMANDO TERMUX:\033[0m curl -sO https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/slowdns && chmod +x slowdns && ./slowdns " && cat /etc/slowdns/infons /root/server.pub
 echo ""
-echo -e "\033[1;33m SUA KEY está salva no arquivo /root/server.pub\033[0m"
+echo -e "\033[1;33m YOUR KEY is saved in file /root/server.pub\033[0m"
 echo -e "\033[1;33mGuarde-a em um local seguro, pode precisar no futuro!\033[0m"
 echo ""
 read -p "Pressione [Enter] para voltar ao menu ou CTRL+C para sair"
@@ -205,7 +205,7 @@ echo -ne "\033[1;33mSUA KEY:\033[0m " && cat /root/server.pub
 echo ""
 echo -ne "\033[1;33mCOMANDO TERMUX:\033[0m curl -sO https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/slowdns && chmod +x slowdns && ./slowdns " && cat /etc/slowdns/infons /root/server.pub
 echo ""
-echo -e "\033[1;33m SUA KEY está salva no arquivo /root/server.pub\033[0m"
+echo -e "\033[1;33m YOUR KEY is saved in file /root/server.pub\033[0m"
 echo -e "\033[1;33mGuarde-a em um local seguro, pode precisar no futuro!\033[0m"
 echo ""
 read -p "Pressione [Enter] para voltar ao menu ou CTRL+C para sair"
@@ -254,7 +254,7 @@ echo -ne "\033[1;33mSUA KEY:\033[0m " && cat /root/server.pub
 echo ""
 echo -ne "\033[1;33mCOMANDO TERMUX:\033[0m curl -sO https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/slowdns && chmod +x slowdns && ./slowdns " && cat /etc/slowdns/infons /root/server.pub
 echo ""
-echo -e "\033[1;33m SUA KEY está salva no arquivo /root/server.pub\033[0m"
+echo -e "\033[1;33m YOUR KEY is saved in file /root/server.pub\033[0m"
 echo -e "\033[1;33mGuarde-a em um local seguro, pode precisar no futuro!\033[0m"
 echo ""
 read -p "Pressione [Enter] para voltar ao menu ou CTRL+C para sair"
@@ -286,7 +286,7 @@ echo -ne "\033[1;33mSUA KEY:\033[0m " && cat /root/server.pub
 echo ""
 echo -ne "\033[1;33mCOMANDO TERMUX:\033[0m curl -sO https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/slowdns && chmod +x slowdns && ./slowdns " && cat /etc/slowdns/infons /root/server.pub
 echo ""
-echo -e "\033[1;33m SUA KEY está salva no arquivo /root/server.pub\033[0m"
+echo -e "\033[1;33m YOUR KEY is saved in file /root/server.pub\033[0m"
 echo -e "\033[1;33mGuarde-a em um local seguro, pode precisar no futuro!\033[0m"
 echo ""
 read -p "Pressione [Enter] para voltar ao menu ou CTRL+C para sair"
