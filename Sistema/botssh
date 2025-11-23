@@ -4,7 +4,7 @@ clear
 source ShellBot.sh
 touch lista
 [[ -z $1 ]] && {
-    clear && echo "INFORME O TOKEN" && return 0
+    clear && echo "ENTER THE TOKEN" && return 0
 }
 # Informações Server 2
 ip_server2="SEU-IP-AQUI"
@@ -21,9 +21,9 @@ ShellBot.username
 menu() {
     local msg
         msg="=×=×=×=×=×=×=×=×=×=×=×=×=×=\n"
-        msg+="<b>🤖 OLA SEJA BEM VINDO(a) 🤖</b>\n"
+        msg+="<b>🤖 HELLO WELCOME 🤖</b>\n"
         msg+="=×=×=×=×=×=×=×=×=×=×=×=×=×=\n\n"
-        msg+="Gere seu teste agora mesmo!"
+        msg+="Generate your test now!"
         ShellBot.sendMessage --chat_id ${message_chat_id[$id]} \
         --text "$(echo -e $msg)" \
         --reply_markup "$keyboard1" \
@@ -35,7 +35,7 @@ menu() {
 criarteste() {
     [[ $(grep -wc ${callback_query_from_id} lista) != '0' ]] && {
       ShellBot.sendMessage --chat_id ${callback_query_message_chat_id} \
-        --text "VC JA CRIOU SSH HOJE !"
+        --text "YOU ALREADY CREATED SSH TODAY!"
       return 0
     }
     usuario=$(echo teste$(( RANDOM% + 250 )))
@@ -58,7 +58,7 @@ rm -rf /etc/SSHPlus/userteste/$usuario.sh" > /etc/SSHPlus/userteste/$usuario.sh
     echo ${callback_query_from_id} >> lista
     # - ENVIA O SSH
     ShellBot.sendMessage --chat_id ${callback_query_message_chat_id} \
-    --text "$(echo -e "✅ <b>Criado com sucesso</b> ✅\n\nIP: $(cat /etc/IP)\nUSUARIO: <code>$usuario</code>\nSENHA: <code>$senha</code>\n\n⏳ Expira em: $tempo Hora")" \
+    --text "$(echo -e "✅ <b>Created successfully</b> ✅\n\nIP: $(cat /etc/IP)\nUSER: <code>$usuario</code>\nPASSWORD: <code>$senha</code>\n\n⏳ Expires in: $tempo Hour")" \
     --parse_mode html
     return 0
 }
@@ -67,7 +67,7 @@ rm -rf /etc/SSHPlus/userteste/$usuario.sh" > /etc/SSHPlus/userteste/$usuario.sh
 criarteste2() {
    [[ $(grep -wc ${callback_query_from_id} lista) != '0' ]] && {
       ShellBot.sendMessage --chat_id ${callback_query_message_chat_id} \
-        --text "VC JA CRIOU SSH HOJE !"
+        --text "YOU ALREADY CREATED SSH TODAY!"
       return 0
     }
     usuario=$(echo teste$(( RANDOM% + 250 )))
@@ -93,7 +93,7 @@ EOF
 	echo ${callback_query_from_id} >> lista
     # - ENVIA O SSH
     ShellBot.sendMessage --chat_id ${callback_query_message_chat_id} \
-    --text "$(echo -e "✅ <b>Criado com sucesso</b> ✅\n\nIP: $ip_server2\nUSUARIO: <code>$usuario</code>\nSENHA: <code>$senha</code>\n\n⏳ Expira em: $tempo Hora")" \
+    --text "$(echo -e "✅ <b>Created successfully</b> ✅\n\nIP: $ip_server2\nUSER: <code>$usuario</code>\nPASSWORD: <code>$senha</code>\n\n⏳ Expires in: $tempo Hour")" \
     --parse_mode html
     return 0
 else
@@ -108,7 +108,7 @@ fi
 criarteste3() {
 	[[ $(grep -wc ${callback_query_from_id} lista) != '0' ]] && {
       ShellBot.sendMessage --chat_id ${callback_query_message_chat_id} \
-        --text "VC JA CRIOU SSH HOJE !"
+        --text "YOU ALREADY CREATED SSH TODAY!"
       return 0
     }
     usuario=$(echo teste$(( RANDOM% + 250 )))
@@ -134,7 +134,7 @@ EOF
 	echo ${callback_query_from_id} >> lista
     # - ENVIA O SSH
     ShellBot.sendMessage --chat_id ${callback_query_message_chat_id} \
-    --text "$(echo -e "✅ <b>Criado com sucesso</b> ✅\n\nIP: $ip_server3\nUSUARIO: <code>$usuario</code>\nSENHA: <code>$senha</code>\n\n⏳ Expira em: $tempo Hora")" \
+    --text "$(echo -e "✅ <b>Created successfully</b> ✅\n\nIP: $ip_server3\nUSER: <code>$usuario</code>\nPASSWORD: <code>$senha</code>\n\n⏳ Expires in: $tempo Hour")" \
     --parse_mode html
     return 0
 else

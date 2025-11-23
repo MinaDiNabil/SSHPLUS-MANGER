@@ -614,26 +614,26 @@ SCOLOR='\033[0m'
 				}
 				verif_ptrs $porta
                 clear
-                echo -ne "\033[1;32mNome do usuário:\033[1;37m ";read username
+                echo -ne "\033[1;32mUsername:\033[1;37m ";read username
                 [[ -z $username ]] && {
-                    echo -e "\n${cor1}Nome de usuário vazio ou invalido!${scor}\n"
+                    echo -e "\n${cor1}Empty or invalid username!${scor}\n"
                     fun_chisel
                 }
                 [[ ${username} != ?(+|-)+([a-zA-Z0-9]) ]] && {
-                    echo -e "\n${cor1}Você digitou um nome de usuário inválido!${scor}"
-                    echo -e "${cor1}Não use espaços, acentos ou caracteres especiais!${scor}\n"
+                    echo -e "\n${cor1}You entered an invalid username!${scor}"
+                    echo -e "${cor1}Do not use spaces, accents or special characters!${scor}\n"
                     fun_chisel
                 }
                 sizemin=$(echo ${#username})
                 [[ $sizemin -lt 2 ]] && {
-                    echo -e "\n${cor1}Você digitou um nome de usuário muito curto${scor}"
-                    echo -e "${cor1}use no mínimo dois caracteres!${scor}\n"
+                    echo -e "\n${cor1}You entered a very short username${scor}"
+                    echo -e "${cor1}use at least two characters!${scor}\n"
                     fun_chisel
                 }
                 sizemax=$(echo ${#username})
                 [[ $sizemax -gt 10 ]] && {
-                    echo -e "\n${cor1}Você digitou um nome de usuário muito grande"
-                    echo -e "${cor1}use no máximo 10 caracteres!${scor}\n"
+                    echo -e "\n${cor1}You entered a very long username"
+                    echo -e "${cor1}use a maximum of 10 characters!${scor}\n"
                     fun_chisel
                 }
                 echo -ne "\033[1;32mSenha:\033[1;37m ";read password
@@ -1242,7 +1242,7 @@ SCOLOR='\033[0m'
 							fun_openvpn
 						fi
 						if [[ "$(grep -w "$host" /etc/hosts | wc -l)" -gt "0" ]]; then
-							echo -e "\E[41;1;37m    Esse host ja está adicionado  !    \E[0m"
+							echo -e "\E[41;1;37m    This host is already added!    \E[0m"
 							sleep 2
 							fun_openvpn
 						fi
