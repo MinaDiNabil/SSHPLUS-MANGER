@@ -750,7 +750,7 @@ infovps() {
     info="=×=×=×=×=×=×=×=×=×=×=×=×=×=\n"
     info+="<b>INFORMACOES DO SERVIDOR</b>\n"
     info+="=×=×=×=×=×=×=×=×=×=×=×=×=×=\n\n"
-    info+="<b>SISTEMA OPERACIONAL</b>\n"
+    info+="<b>OPERATING SYSTEM</b>\n"
     info+="$system\n\n"
     info+="<b>PROCESSADOR</b>\n"
     info+="<b>Nucleos:</b> $cpucores\n"
