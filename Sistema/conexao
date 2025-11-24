@@ -1680,14 +1680,23 @@ exit 0' >$RCLOCAL
 				ssh_ports=$(grep 'Port' /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2 | grep -v 'no' | xargs)
 				dropbear_main=$(grep 'DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d'=' -f2)
 				dropbear_extra=$(grep 'DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear 2>/dev/null | grep -oP '\-p \K[0-9]+' | xargs)
+				all_ssh_ports="$ssh_ports $dropbear_main $dropbear_extra"
 
-				echo -e "\033[1;33mINFO - ACTIVE SSH/DROPBEAR PORTS:\033[0m"
+				echo -e "\033[1;33mACTIVE SSH/DROPBEAR PORTS:\033[0m"
 				[[ -n "$ssh_ports" ]] && echo -e "  \033[1;32mOpenSSH:\033[1;37m $ssh_ports"
 				[[ -n "$dropbear_main" ]] && echo -e "  \033[1;32mDropbear:\033[1;37m $dropbear_main $dropbear_extra"
-				echo -e "\033[1;33mNOTA:\033[0m WEBSOCKET ira se conectar a porta SSH 22 por padrao"
+				[[ -n "$all_ssh_ports" ]] || echo -e "  \033[1;31mNo active SSH port found!"
 				echo ""
 
-				echo -ne "\033[1;32mQUAL PORTA DESEJA ADICIONAR \033[1;33m?\033[1;37m: "
+				echo -ne "\033[1;32mEnter an active SSH/DROPBEAR port\033[1;33m:\033[1;37m "
+				read sshport
+				[[ -z "$sshport" ]] && {
+					echo -e "\n\033[1;31mInvalid port!"
+					sleep 3
+					fun_socks
+				}
+				echo ""
+				echo -ne "\033[1;32mWHICH PORT TO ADD WEBSOCKET \033[1;33m?\033[1;37m: "
 				read porta
 				[[ -z "$porta" ]] && {
 					echo -e "\n\033[1;31mInvalid port!"
@@ -1700,16 +1709,16 @@ exit 0' >$RCLOCAL
 				while screen -ls | grep -q "\.ws$ws_num\s"; do
 					((ws_num++))
 				done
-				echo -e "\n\033[1;32mADICIONANDO WEBSOCKET NA PORTA $porta\033[0m"
+				echo -e "\n\033[1;32mADDING WEBSOCKET ON PORT $porta (SSH: $sshport)\033[0m"
 				echo ""
 				fun_iniwssocks() {
 					sleep 1
-					screen -dmS ws$ws_num python /etc/SSHPlus/wsproxy.py $porta
-					echo -e "netstat -tlpn | grep -w $porta > /dev/null || screen -dmS ws$ws_num python /etc/SSHPlus/wsproxy.py $porta" >>/etc/autostart
+					screen -dmS ws$ws_num python /etc/SSHPlus/wsproxy.py $porta $sshport
+					echo -e "netstat -tlpn | grep -w $porta > /dev/null || screen -dmS ws$ws_num python /etc/SSHPlus/wsproxy.py $porta $sshport" >>/etc/autostart
 				}
 				fun_bar 'fun_iniwssocks'
 				echo ""
-				echo -e "\033[1;32mWEBSOCKET ATIVADO NA PORTA $porta\033[0m"
+				echo -e "\033[1;32mWEBSOCKET ACTIVATED ON PORT $porta (SSH: $sshport)\033[0m"
 				sleep 3
 				fun_socks
 			elif [[ "$ws_opt" = '2' ]]; then
