@@ -8,12 +8,16 @@ try:
    LISTENING_PORT = int(sys.argv[1])
 except:
    LISTENING_PORT = 80
+try:
+   SSH_PORT = int(sys.argv[2])
+except:
+   SSH_PORT = 22
 BUFLEN = 4096 * 4
 TIMEOUT = 60
 MSG = ''
 COR = '<font color="null">'
 FTAG = '</font>'
-DEFAULT_HOST = "127.0.0.1:22"
+DEFAULT_HOST = "127.0.0.1:" + str(SSH_PORT)
 RESPONSE = "HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n"
  
 class Server(threading.Thread):
