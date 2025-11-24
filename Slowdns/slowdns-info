@@ -10,5 +10,5 @@ echo ""
 echo -e "\033[1;33m YOUR KEY is saved in file /root/server.pub\033[0m"
 echo -e "\033[1;33mGuarde-a em um local seguro, pode precisar no futuro!\033[0m"
 echo ""
-read -p "Pressione [Enter] para voltar ao menu ou CTRL+C para sair"
+read -p "Press [Enter] to return to menu or CTRL+C to exit"
 slowdns

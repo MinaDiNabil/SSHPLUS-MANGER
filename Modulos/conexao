@@ -48,7 +48,7 @@ SCOLOR='\033[0m'
 		for pton in $(echo -e "$PT" | cut -d: -f2 | cut -d' ' -f1 | uniq); do
 			svcs=$(echo -e "$PT" | grep -w "$pton" | awk '{print $1}' | uniq)
 			[[ "$porta" = "$pton" ]] && {
-				echo -e "\n\033[1;31mPORTA \033[1;33m$porta \033[1;31mEM USO PELO \033[1;37m$svcs\033[0m"
+				echo -e "\n\033[1;31mPORTA \033[1;33m$porta \033[1;31mIN USE BY \033[1;37m$svcs\033[0m"
 				sleep 3
 				fun_conexao
 			}
@@ -69,7 +69,7 @@ SCOLOR='\033[0m'
 
 	inst_sqd() {
 		if netstat -nltp | grep 'squid' 1>/dev/null 2>/dev/null; then
-			echo -e "\E[41;1;37m            REMOVER SQUID PROXY              \E[0m"
+			echo -e "\E[41;1;37m            REMOVE SQUID PROXY              \E[0m"
 			echo ""
 			echo -ne "\033[1;32mDO YOU REALLY WANT TO REMOVE SQUID \033[1;31m? \033[1;33m[y/n]:\033[1;37m "
 			read resp
@@ -729,7 +729,7 @@ SCOLOR='\033[0m'
 				dropbear_extra=$(grep 'DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear 2>/dev/null | grep -oP '\-p \K[0-9]+' | xargs)
 				all_ssh_ports="$ssh_ports $dropbear_main $dropbear_extra"
 
-				echo -e "\n\033[1;33mPORTAS SSH/DROPBEAR ATIVAS:\033[0m"
+				echo -e "\n\033[1;33mACTIVE SSH/DROPBEAR PORTS:\033[0m"
 				[[ -n "$ssh_ports" ]] && echo -e "  \033[1;32mOpenSSH:\033[1;37m $ssh_ports"
 				[[ -n "$dropbear_main" ]] && echo -e "  \033[1;32mDropbear:\033[1;37m $dropbear_main $dropbear_extra"
 				[[ -n "$all_ssh_ports" ]] || echo -e "  \033[1;31mNenhuma porta SSH ativa encontrada!"
@@ -810,7 +810,7 @@ SCOLOR='\033[0m'
 			}
 		else
 			clear
-			echo -e "\E[44;1;37m              INSTALAR SSL TUNNEL               \E[0m"
+			echo -e "\E[44;1;37m              INSTALL SSL TUNNEL               \E[0m"
 			echo ""
 			# Get active SSH and Dropbear ports
 			ssh_ports=$(grep 'Port' /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2 | grep -v 'no' | xargs)
@@ -1296,7 +1296,7 @@ SCOLOR='\033[0m'
 						read option
 						if [[ -z $option ]]; then
 							echo ""
-							echo -e "\E[41;1;37m          Opcao invalida  !        \E[0m"
+							echo -e "\E[41;1;37m          Invalid option  !        \E[0m"
 							sleep 2
 							fun_openvpn
 						fi
@@ -1355,7 +1355,7 @@ SCOLOR='\033[0m'
 				fun_conexao
 			}
 			echo ""
-			read -p "$(echo -e "\033[1;32mQUAL PORTA DESEJA UTILIZAR? \033[1;37m")" -e -i 1194 porta
+			read -p "$(echo -e "\033[1;32mWHICH PORT DO YOU WANT TO USE? \033[1;37m")" -e -i 1194 porta
 			[[ -z "$porta" ]] && {
 				echo ""
 				echo -e "\033[1;31mPorta invalida!"
@@ -1363,11 +1363,11 @@ SCOLOR='\033[0m'
 				fun_conexao
 			}
 			echo ""
-			echo -e "\033[1;33mVERIFICANDO PORTA..."
+			echo -e "\033[1;33mCHECKING PORT..."
 			verif_ptrs $porta
 			echo ""
-			echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;33mSistema"
-			echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;33mGoogle (\033[1;32mRecomendado\033[1;33m)"
+			echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;33mSystem"
+			echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;33mGoogle (\033[1;32mRecommended\033[1;33m)"
 			echo -e "\033[1;31m[\033[1;36m3\033[1;31m] \033[1;33mOpenDNS"
 			echo -e "\033[1;31m[\033[1;36m4\033[1;31m] \033[1;33mCloudflare"
 			echo -e "\033[1;31m[\033[1;36m5\033[1;31m] \033[1;33mHurricane Electric"
@@ -1377,7 +1377,7 @@ SCOLOR='\033[0m'
 			read -p "$(echo -e "\033[1;32mWHICH DNS DO YOU WANT TO USE? \033[1;37m")" -e -i 2 DNS
 			echo ""
 			echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;33mUDP"
-			echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;33mTCP (\033[1;32mRecomendado\033[1;33m)"
+			echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;33mTCP (\033[1;32mRecommended\033[1;33m)"
 			echo ""
 			read -p "$(echo -e "\033[1;32mWHICH PROTOCOL DO YOU WANT TO USE FOR OPENVPN? \033[1;37m")" -e -i 2 resp
 			if [[ "$resp" = '1' ]]; then
@@ -1682,7 +1682,7 @@ exit 0' >$RCLOCAL
 		elif [[ "$resposta" = '2' ]]; then
 			clear
 			# Show submenu for WEBSOCKET management
-			echo -e "\E[44;1;37m            GERENCIAR WEBSOCKET             \E[0m"
+			echo -e "\E[44;1;37m            MANAGE WEBSOCKET             \E[0m"
 			# Get all running websocket ports
 			ws_ports=$(screen -ls | grep "\.ws" | awk '{print $1}' | cut -d. -f2 | sed 's/ws//g' | xargs)
 			[[ -n "$ws_ports" ]] && echo -e "\n\033[1;33mACTIVE PORTS\033[1;37m: \033[1;32m$ws_ports" || echo -e "\n\033[1;33mNO ACTIVE PORT\033[0m"
@@ -1741,7 +1741,7 @@ exit 0' >$RCLOCAL
 					sleep 2
 					fun_socks
 				fi
-				echo -e "\n\033[1;33mPORTAS ATIVAS:\033[0m"
+				echo -e "\n\033[1;33mACTIVE PORTS:\033[0m"
 				for ws_session in $ws_list; do
 					ws_name=$(echo $ws_session | cut -d. -f2)
 					ws_pid=$(echo $ws_session | cut -d. -f1)
@@ -1867,7 +1867,7 @@ exit 0' >$RCLOCAL
 				clear
 				echo -e "\E[44;1;37m            PROXY SOCKS             \E[0m"
 				echo ""
-				echo -e "\033[1;33mPORTAS EM USO: \033[1;32m$sockspt"
+				echo -e "\033[1;33mPORTS IN USE: \033[1;32m$sockspt"
 				echo ""
 				echo -ne "\033[1;32mWHICH PORT DO YOU WANT TO USE \033[1;33m?\033[1;37m: "
 				read porta
@@ -2229,9 +2229,9 @@ exit 0' >$RCLOCAL
 			[[ ! -e '/home/sshplus' ]] && exit 0
 			clear
 			echo -e "\E[44;1;37m                MODO DE CONEXAO                 \E[0m\n"
-			echo -e "\033[1;32mSERVICO: \033[1;33mOPENSSH \033[1;32mPORTA: \033[1;37m$(grep 'Port' /etc/ssh/sshd_config | cut -d' ' -f2 | grep -v 'no' | xargs)" && sts6="\033[1;32m◉ "
+			echo -e "\033[1;32mSERVICE: \033[1;33mOPENSSH \033[1;32mPORT: \033[1;37m$(grep 'Port' /etc/ssh/sshd_config | cut -d' ' -f2 | grep -v 'no' | xargs)" && sts6="\033[1;32m◉ "
 			[[ "$(netstat -tlpn | grep 'docker' | wc -l)" != '0' ]] && {
-				echo -e "\033[1;32mSERVICO: \033[1;33mCHISEL: \033[1;32mPORTA: \033[1;37m$(netstat -nplt | grep 'docker' | awk {'print $4'} | cut -d: -f2 | xargs)"
+				echo -e "\033[1;32mSERVICE: \033[1;33mCHISEL: \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'docker' | awk {'print $4'} | cut -d: -f2 | xargs)"
 				sts8="\033[1;32m◉ "
 			} || {
 				sts8="\033[1;31m○ "
@@ -2242,39 +2242,39 @@ exit 0' >$RCLOCAL
 				sts9="\033[1;31m○ "
 			}
 			[[ "$(netstat -tlpn | grep 'sslh' | wc -l)" != '0' ]] && {
-				echo -e "\033[1;32mSERVICO: \033[1;33mSSLH: \033[1;32mPORTA: \033[1;37m$(netstat -nplt | grep 'sslh' | awk {'print $4'} | cut -d: -f2 | xargs)"
+				echo -e "\033[1;32mSERVICE: \033[1;33mSSLH: \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'sslh' | awk {'print $4'} | cut -d: -f2 | xargs)"
 				sts7="\033[1;32m◉ "
 			} || {
 				sts7="\033[1;31m○ "
 			}
 
 			[[ "$(netstat -tlpn | grep 'openvpn' | wc -l)" != '0' ]] && {
-				echo -e "\033[1;32mSERVICO: \033[1;33mOPENVPN: \033[1;32mPORTA: \033[1;37m$(netstat -nplt | grep 'openvpn' | awk {'print $4'} | cut -d: -f2 | xargs)"
+				echo -e "\033[1;32mSERVICE: \033[1;33mOPENVPN: \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'openvpn' | awk {'print $4'} | cut -d: -f2 | xargs)"
 				sts5="\033[1;32m◉ "
 			} || {
 				sts5="\033[1;31m○ "
 			}
 
 			[[ "$(netstat -tlpn | grep 'python' | wc -l)" != '0' ]] && {
-				echo -e "\033[1;32mSERVICO: \033[1;33mPROXY SOCKS \033[1;32mPORTA: \033[1;37m$(netstat -nplt | grep 'python' | awk {'print $4'} | cut -d: -f2 | xargs)"
+				echo -e "\033[1;32mSERVICE: \033[1;33mPROXY SOCKS \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'python' | awk {'print $4'} | cut -d: -f2 | xargs)"
 				sts4="\033[1;32m◉ "
 			} || {
 				sts4="\033[1;31m○ "
 			}
 			[[ -e "/etc/stunnel/stunnel.conf" ]] && {
-				echo -e "\033[1;32mSERVICO: \033[1;33mSSL TUNNEL \033[1;32mPORTA: \033[1;37m$(netstat -nplt | grep 'stunnel' | awk {'print $4'} | cut -d: -f2 | xargs)"
+				echo -e "\033[1;32mSERVICE: \033[1;33mSSL TUNNEL \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'stunnel' | awk {'print $4'} | cut -d: -f2 | xargs)"
 				sts3="\033[1;32m◉ "
 			} || {
 				sts3="\033[1;31m○ "
 			}
 			[[ "$(netstat -tlpn | grep 'dropbear' | wc -l)" != '0' ]] && {
-				echo -e "\033[1;32mSERVICO: \033[1;33mDROPBEAR \033[1;32mPORTA: \033[1;37m$(netstat -nplt | grep 'dropbear' | awk -F ":" {'print $4'} | xargs)"
+				echo -e "\033[1;32mSERVICE: \033[1;33mDROPBEAR \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'dropbear' | awk -F ":" {'print $4'} | xargs)"
 				sts2="\033[1;32m◉ "
 			} || {
 				sts2="\033[1;31m○ "
 			}
 			[[ "$(netstat -tlpn | grep 'squid' | wc -l)" != '0' ]] && {
-				echo -e "\033[1;32mSERVICO: \033[1;33mSQUID \033[1;32mPORTA: \033[1;37m$(netstat -nplt | grep 'squid' | awk -F ":" {'print $4'} | xargs)"
+				echo -e "\033[1;32mSERVICE: \033[1;33mSQUID \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'squid' | awk -F ":" {'print $4'} | xargs)"
 				sts1="\033[1;32m◉ "
 			} || {
 				sts1="\033[1;31m○ "
@@ -2302,8 +2302,8 @@ exit 0' >$RCLOCAL
 [\033[1;36m09\033[1;31m] \033[1;37m• \033[1;33mSLOWDNS $sts9\033[1;31m
 [\033[1;36m10\033[1;31m] \033[1;37m• \033[1;33mV2RAY $xv2ray\033[1;31m
 [\033[1;36m11\033[1;31m] \033[1;37m• \033[1;33mTROJAN-GO $trojansts\033[1;31m
-[\033[1;36m12\033[1;31m] \033[1;37m• \033[1;33mVOLTAR \033[1;32m<\033[1;33m<\033[1;31m< \033[1;31m
-[\033[1;36m00\033[1;31m] \033[1;37m• \033[1;33mSAIR \033[1;32m<\033[1;33m<\033[1;31m< \033[0m"
+[\033[1;36m12\033[1;31m] \033[1;37m• \033[1;33mBACK \033[1;32m<\033[1;33m<\033[1;31m< \033[1;31m
+[\033[1;36m00\033[1;31m] \033[1;37m• \033[1;33mEXIT \033[1;32m<\033[1;33m<\033[1;31m< \033[0m"
 			echo ""
 			echo -e "\033[0;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 			echo ""

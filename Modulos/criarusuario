@@ -113,9 +113,9 @@ fun_edithost() {
     echo -e "\033[1;31m[\033[1;36m4\033[1;31m] \033[1;33mOPEN SQUID \033[1;31m[\033[1;32mAPP MOD\033[1;31m]"
     echo -e "\033[1;31m[\033[1;36m5\033[1;31m] \033[1;33mVIVO MMS \033[1;31m[\033[1;37mAPN: \033[1;32mmms.vivo.com.br\033[1;31m]"
     echo -e "\033[1;31m[\033[1;36m6\033[1;31m] \033[1;33mMODO BYPASS \033[1;31m[\033[1;32mOPEN + INJECTOR\033[1;31m]"
-    echo -e "\033[1;31m[\033[1;36m7\033[1;31m] \033[1;33mTODOS HOSTS \033[1;31m[\033[1;32m1 OVPN DE CADA\033[1;31m]"
-    echo -e "\033[1;31m[\033[1;36m8\033[1;31m] \033[1;33mEDITAR MANUALMENTE"
-    echo -e "\033[1;31m[\033[1;36m0\033[1;31m] \033[1;33mVOLTAR"
+    echo -e "\033[1;31m[\033[1;36m7\033[1;31m] \033[1;33mALL HOSTS \033[1;31m[\033[1;32m1 OVPN EACH\033[1;31m]"
+    echo -e "\033[1;31m[\033[1;36m8\033[1;31m] \033[1;33mEDIT MANUALLY"
+    echo -e "\033[1;31m[\033[1;36m0\033[1;31m] \033[1;33mBACK"
     echo ""
     echo -ne "\033[1;32mWHICH HOST DO YOU WANT TO USE \033[1;33m?\033[1;37m "
     read respo
