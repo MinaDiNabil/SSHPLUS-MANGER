@@ -857,41 +857,50 @@ SCOLOR='\033[0m'
 			echo -e "\n\033[1;32mINSTALANDO O SSL TUNNEL !\033[1;33m"
 			echo ""
 			fun_bar 'apt-get update -y' 'apt-get install stunnel4 -y'
+			echo -e "\n\033[1;32mCRIANDO CERTIFICADOS !\033[0m"
+			echo ""
+			ssl_certif() {
+				cd /etc/stunnel/
+				# Download certificates from repository
+				wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/cert -O cert.pem
+				wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/key -O key.pem
+				chmod 600 cert.pem key.pem
+				# Enable stunnel4 service
+				sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
+				cd $HOME
+			}
+			fun_bar 'ssl_certif'
 			echo -e "\n\033[1;32mCONFIGURANDO O SSL TUNNEL !\033[0m"
 			echo ""
 			ssl_conf() {
-				echo -e "cert = /etc/stunnel/stunnel.pem\nclient = no\nsocket = a:SO_REUSEADDR=1\nsocket = l:TCP_NODELAY=1\nsocket = r:TCP_NODELAY=1\n\n[stunnel]\nconnect = 127.0.0.1:$portssl\naccept = ${porta}" >/etc/stunnel/stunnel.conf
+				cat > /etc/stunnel/stunnel.conf <<-EOF
+cert = /etc/stunnel/cert.pem
+key = /etc/stunnel/key.pem
+client = no
+socket = a:SO_REUSEADDR=1
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+
+[stunnel]
+connect = 127.0.0.1:${portssl}
+accept = ${porta}
+EOF
+				chmod 644 /etc/stunnel/stunnel.conf
 			}
 			fun_bar 'ssl_conf'
-			echo -e "\n\033[1;32mCRIANDO CERTIFICADO !\033[0m"
-			echo ""
-			ssl_certif() {
-				#crt='EC'
-				#openssl genrsa -out key.pem 2048 >/dev/null 2>&1
-				#(
-				#echo $crt
-				#echo $crt
-				#echo $crt
-				#echo $crt
-				#echo $crt
-				#echo $crt
-				#echo $crt
-				#) | openssl req -new -x509 -key key.pem -out cert.pem -days 1050 >/dev/null 2>&1
-				#cat cert.pem key.pem >>/etc/stunnel/stunnel.pem
-				#rm key.pem cert.pem >/dev/null 2>&1
-				sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
-				cd /etc/stunnel && wget https://raw.githubusercontent.com/rodrigo12xd/SSHPLUS/master/Sistema/script/stunnel.pem && cd $HOME
-			}
-			fun_bar 'ssl_certif'
 			echo -e "\n\033[1;32mINICIANDO O SSL TUNNEL !\033[0m"
 			echo ""
 			fun_finssl() {
+				service stunnel4 stop
+				sleep 1
+				service stunnel4 start
+				sleep 1
 				service stunnel4 restart
-				service ssh restart
 				/etc/init.d/stunnel4 restart
 			}
-		fun_bar 'fun_finssl' 'service stunnel4 restart'
-		echo -e "\n\033[1;32m✓ SSL TUNNEL INSTALADO COM SUCESSO !\033[0m"
+		fun_bar 'fun_finssl'
+		clear
+		echo -e "\033[1;32m✓ SSL TUNNEL INSTALADO COM SUCESSO !\033[0m"
 		echo -e "\033[1;33mPorta de escuta (SSL):\033[1;32m $porta\033[0m"
 		echo -e "\033[1;33mPorta SSH/DROPBEAR:\033[1;32m $portssl\033[0m"
 		echo ""
