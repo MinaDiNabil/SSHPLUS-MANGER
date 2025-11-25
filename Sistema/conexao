@@ -83,6 +83,11 @@ SCOLOR='\033[0m'
 				clear
 				fun_conexao
 			} || {
+				echo -e "\n\033[1;31mRetornando...\033[0m"
+				sleep 2
+				clear
+				fun_conexao
+			}
 		else
 			clear
 			echo -e "\E[44;1;37m              INSTALADOR SQUID                \E[0m"
@@ -204,6 +209,11 @@ SCOLOR='\033[0m'
 			var_sqd="/etc/squid3/squid.conf"
 		else
 			echo -e "\n\033[1;31mSQUID NAO ESTA INSTALADO!\033[0m"
+			echo -e "\n\033[1;31mRetornando...\033[0m"
+			sleep 2
+			clear
+			fun_squid
+		fi
 		echo -ne "\033[1;32mQUAL PORTA DESEJA ADICIONAR \033[1;33m?\033[1;37m "
 		read pt
 		[[ -z "$pt" ]] && {
@@ -235,6 +245,11 @@ SCOLOR='\033[0m'
 			var_sqd="/etc/squid3/squid.conf"
 		else
 			echo -e "\n\033[1;31mSQUID NAO ESTA INSTALADO!\033[0m"
+			echo -e "\n\033[1;31mRetornando...\033[0m"
+			sleep 2
+			clear
+			fun_squid
+		fi
 		echo -ne "\033[1;32mWHICH PORT DO YOU WANT TO REMOVE \033[1;33m?\033[1;37m "
 		read pt
 		[[ -z "$pt" ]] && {
@@ -292,6 +307,11 @@ SCOLOR='\033[0m'
 			rempt_sqd
 			;;
 		0 | 00)
+			echo -e "\033[1;31mRetornando...\033[0m"
+			sleep 1
+			fun_conexao
+			;;
+		*)
 			echo -e "\033[1;31mOpcao Invalida...\033[0m"
 			sleep 2
 			fun_conexao
@@ -420,6 +440,11 @@ SCOLOR='\033[0m'
 				clear
 				fun_conexao
 			elif [[ "$resposta" = '0' ]]; then
+				echo -e "\n\033[1;31mRetornando...\033[0m"
+				sleep 2
+				fun_conexao
+			else
+				echo -e "\n\033[1;31mInvalid option...\033[0m"
 				sleep 2
 				fun_conexao
 			fi
@@ -475,6 +500,11 @@ SCOLOR='\033[0m'
 				fun_conexao
 			} || {
 				echo""
+				echo -e "\033[1;31mRetornando...\033[0m"
+				sleep 3
+				clear
+				fun_conexao
+			}
 		fi
 	}
         fun_v2rayins() {
@@ -489,12 +519,22 @@ SCOLOR='\033[0m'
 	            echo -ne "${GREEN}DESEJA CONTINUAR A REINSTALAÇÃO ? ${YELLOW}[s/n]:${SCOLOR} "
 	            read resp
 	            [[ "$resp" != @(s|sim|S|SIM) ]] && {
+	                echo -e "\n${RED}Retornando...${SCOLOR}"
+	                sleep 2
+	                conexao
+	            }
+	            v2rayinst
 	        else
 	            echo -e "\E[44;1;37m            INSTALADOR V2RAY             \E[0m"
 	            echo -e "\n${YELLOW}ESTEJA CIENTE QUE ESSE METODO É INSTAVEL\nFIQUE CIENTE DOS RISCOS ! ${SCOLOR}\n"
 	            echo -ne "${GREEN}DESEJA CONTINUAR A INSTALACAO ? ${YELLOW}[s/n]:${SCOLOR} "
 	            read resp
 	            [[ "$resp" != @(s|sim|S|SIM) ]] && {
+	                echo -e "\n${RED}Retornando...${SCOLOR}"
+	                sleep 2
+	                conexao
+	            }
+	            v2rayinst
             fi
         }
     	fun_chisel() {
@@ -552,6 +592,11 @@ SCOLOR='\033[0m'
                 echo -ne "${GREEN}DESEJA CONTINUAR A INSTALACAO ? ${YELLOW}[s/n]:${SCOLOR} "
                 read resp
                 [[ "$resp" != @(s|sim|S|SIM) ]] && {
+                    echo -e "\n${RED}Retornando...${SCOLOR}"
+                    sleep 2
+                    conexao
+                }
+                echo -e "\n\033[1;32mSuportado Ubuntu 16+\033[1;33m"
                 echo -e "\n\033[1;32mINSTALANDO O CHISEL !\033[1;33m"
 				echo ""
 				fun_bar 'fun_installdocker'
@@ -628,6 +673,11 @@ SCOLOR='\033[0m'
             sleep 1
             fun_chisel
         elif [[ "$resposta" = '0' ]]; then
+			echo ""
+			echo -e "\033[1;31mRetornando...\033[0m"
+			sleep 1
+			fun_conexao
+		else
 			echo ""
 			echo -e "\033[1;31mInvalid option !\033[0m"
 			sleep 1
@@ -744,6 +794,11 @@ SCOLOR='\033[0m'
 				sleep 3
 				fun_conexao
 			} || {
+				echo -e "\033[1;31mRetornando...\033[0m"
+				sleep 3
+				fun_conexao
+			}
+		else
 			clear
 			echo -e "\E[44;1;37m              INSTALL SSL TUNNEL               \E[0m"
 			echo ""
@@ -787,70 +842,63 @@ SCOLOR='\033[0m'
 			echo -e "\E[44;1;37m           INSTALADOR SSL TUNNEL             \E[0m"
 			echo -e "\n\033[1;33mYOU ARE ABOUT TO INSTALL O SSL TUNNEL !\033[0m"
 			echo ""
-				echo -e "\n\033[1;33mDEFINE A PORT FOR SSL TUNNEL !\033[0m"
-				echo ""
-				echo -ne "\033[1;32mWHICH PORT DO YOU WANT TO USE \033[1;33m?\033[1;37m "
-                read porta
-				[[ -z "$porta" ]] && {
-					echo ""
-					echo -e "\033[1;31mInvalid port!"
-					sleep 3
-					clear
-					fun_conexao
-				}
-				verif_ptrs $porta
-				echo -e "\n\033[1;32mINSTALANDO O SSL TUNNEL !\033[1;33m"
-				echo ""
-				fun_bar 'apt-get update -y' 'apt-get install stunnel4 -y'
-				echo -e "\n\033[1;32mCONFIGURANDO O SSL TUNNEL !\033[0m"
-				echo ""
-				ssl_conf() {
-					echo -e "cert = /etc/stunnel/stunnel.pem\nclient = no\nsocket = a:SO_REUSEADDR=1\nsocket = l:TCP_NODELAY=1\nsocket = r:TCP_NODELAY=1\n\n[stunnel]\nconnect = 127.0.0.1:$portssl\naccept = ${porta}" >/etc/stunnel/stunnel.conf
-				}
-				fun_bar 'ssl_conf'
-				echo -e "\n\033[1;32mCRIANDO CERTIFICADO !\033[0m"
-				echo ""
-				ssl_certif() {
-					#crt='EC'
-					#openssl genrsa -out key.pem 2048 >/dev/null 2>&1
-					#(
-					#echo $crt
-					#echo $crt
-					#echo $crt
-					#echo $crt
-					#echo $crt
-					#echo $crt
-					#echo $crt
-					#) | openssl req -new -x509 -key key.pem -out cert.pem -days 1050 >/dev/null 2>&1
-					#cat cert.pem key.pem >>/etc/stunnel/stunnel.pem
-					#rm key.pem cert.pem >/dev/null 2>&1
-					sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
-					cd /etc/stunnel && wget https://raw.githubusercontent.com/rodrigo12xd/SSHPLUS/master/Sistema/script/stunnel.pem && cd $HOME
-				}
-				fun_bar 'ssl_certif'
-				echo -e "\n\033[1;32mINICIANDO O SSL TUNNEL !\033[0m"
-				echo ""
-				fun_finssl() {
-					service stunnel4 restart
-					service ssh restart
-					/etc/init.d/stunnel4 restart
-				}
-			fun_bar 'fun_finssl' 'service stunnel4 restart'
-			echo -e "\n\033[1;32m✓ SSL TUNNEL INSTALADO COM SUCESSO !\033[0m"
-			echo -e "\033[1;33mPorta de escuta (SSL):\033[1;32m $porta\033[0m"
-			echo -e "\033[1;33mPorta SSH/DROPBEAR:\033[1;32m $portssl\033[0m"
+		echo -e "\n\033[1;33mDEFINE A PORT FOR SSL TUNNEL !\033[0m"
 			echo ""
-			echo -e "\033[1;36mUse esta porta no seu aplicativo: \033[1;37m$porta\033[0m"
-			sleep 4
-			clear
-			fun_conexao
-				fun_conexao
-			} || {
-				echo -e "\n\033[1;31mRetornando...\033[0m"
-				sleep 2
+			echo -ne "\033[1;32mWHICH PORT DO YOU WANT TO USE \033[1;33m?\033[1;37m "
+                read porta
+			[[ -z "$porta" ]] && {
+				echo ""
+				echo -e "\033[1;31mInvalid port!"
+				sleep 3
 				clear
 				fun_conexao
 			}
+			verif_ptrs $porta
+			echo -e "\n\033[1;32mINSTALANDO O SSL TUNNEL !\033[1;33m"
+			echo ""
+			fun_bar 'apt-get update -y' 'apt-get install stunnel4 -y'
+			echo -e "\n\033[1;32mCONFIGURANDO O SSL TUNNEL !\033[0m"
+			echo ""
+			ssl_conf() {
+				echo -e "cert = /etc/stunnel/stunnel.pem\nclient = no\nsocket = a:SO_REUSEADDR=1\nsocket = l:TCP_NODELAY=1\nsocket = r:TCP_NODELAY=1\n\n[stunnel]\nconnect = 127.0.0.1:$portssl\naccept = ${porta}" >/etc/stunnel/stunnel.conf
+			}
+			fun_bar 'ssl_conf'
+			echo -e "\n\033[1;32mCRIANDO CERTIFICADO !\033[0m"
+			echo ""
+			ssl_certif() {
+				#crt='EC'
+				#openssl genrsa -out key.pem 2048 >/dev/null 2>&1
+				#(
+				#echo $crt
+				#echo $crt
+				#echo $crt
+				#echo $crt
+				#echo $crt
+				#echo $crt
+				#echo $crt
+				#) | openssl req -new -x509 -key key.pem -out cert.pem -days 1050 >/dev/null 2>&1
+				#cat cert.pem key.pem >>/etc/stunnel/stunnel.pem
+				#rm key.pem cert.pem >/dev/null 2>&1
+				sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
+				cd /etc/stunnel && wget https://raw.githubusercontent.com/rodrigo12xd/SSHPLUS/master/Sistema/script/stunnel.pem && cd $HOME
+			}
+			fun_bar 'ssl_certif'
+			echo -e "\n\033[1;32mINICIANDO O SSL TUNNEL !\033[0m"
+			echo ""
+			fun_finssl() {
+				service stunnel4 restart
+				service ssh restart
+				/etc/init.d/stunnel4 restart
+			}
+		fun_bar 'fun_finssl' 'service stunnel4 restart'
+		echo -e "\n\033[1;32m✓ SSL TUNNEL INSTALADO COM SUCESSO !\033[0m"
+		echo -e "\033[1;33mPorta de escuta (SSL):\033[1;32m $porta\033[0m"
+		echo -e "\033[1;33mPorta SSH/DROPBEAR:\033[1;32m $portssl\033[0m"
+		echo ""
+		echo -e "\033[1;36mUse esta porta no seu aplicativo: \033[1;37m$porta\033[0m"
+		sleep 4
+		clear
+		fun_conexao
 		fi
 	}
 
@@ -908,6 +956,7 @@ SCOLOR='\033[0m'
 		}
 		[[ "$IP1" != "$IP2" ]] && {
 			IP="$IP1"
+		} || {
 			IP="$IP2"
 		}
 		[[ $(netstat -nplt | grep -wc 'openvpn') != '0' ]] && {
@@ -1024,6 +1073,11 @@ SCOLOR='\033[0m'
 						fun_conexao
 					} || {
 						echo ""
+						echo -e "\033[1;31mRetornando...\033[0m"
+						sleep 2
+						fun_conexao
+					}
+					;;
 				3)
 					[[ -d /var/www/html/openvpn ]] && {
 						clear
@@ -1233,6 +1287,11 @@ SCOLOR='\033[0m'
 						sleep 3
 						fun_openvpn
 					elif [[ "$resp" = '0' ]]; then
+						echo ""
+						echo -e "\033[1;31mRetornando...\033[0m"
+						sleep 2
+						fun_conexao
+					else
 						echo ""
 						echo -e "\033[1;31mInvalid option !\033[0m"
 						sleep 2
@@ -2014,6 +2073,11 @@ exit 0' >$RCLOCAL
 				fun_socks
 			fi
 		elif [[ "$resposta" = '0' ]]; then
+			echo ""
+			echo -e "\033[1;31mRetornando...\033[0m"
+			sleep 1
+			fun_conexao
+		else
 			echo ""
 			echo -e "\033[1;31mInvalid option !\033[0m"
 			sleep 1
