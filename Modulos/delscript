@@ -1,8 +1,37 @@
 #!/bin/bash
 clear
-echo -e "\033[1;32mDO YOU WANT TO UNINSTALL SSHPLUS MANAGER\033[1;33m"
-read -p "Do you want to Remove? [y/n] " resp
-if [[ "$resp" = s || "$resp" = S ]];then
+echo -e "\033[1;31m╔═══════════════════════════════════════════════════╗\033[0m"
+echo -e "\033[1;31m║    \033[1;33mUNINSTALL SSHPLUS MANAGER\033[1;31m                     ║\033[0m"
+echo -e "\033[1;31m╚═══════════════════════════════════════════════════╝\033[0m"
+echo ""
+echo -e "\033[1;33m⚠  WARNING: This will completely remove SSHPLUS Manager ⚠\033[0m"
+echo ""
+echo -e "\033[1;37mThis will remove:\033[0m"
+echo -e "  \033[1;31m•\033[1;37m All user accounts and configurations"
+echo -e "  \033[1;31m•\033[1;37m All services (SSH, Dropbear, Squid, OpenVPN, etc.)"
+echo -e "  \033[1;31m•\033[1;37m All scripts and files"
+echo -e "  \033[1;31m•\033[1;37m All logs and history"
+echo ""
+read -p "$(echo -e '\033[1;32mDo you want to continue? \033[1;31m[y/n]\033[1;37m: ')" resp
+
+if [[ "$resp" = "y" || "$resp" = "Y" ]];then
+    echo ""
+    echo -e "\033[1;31mRemoving SSHPLUS Manager...\033[0m"
+    echo ""
+
+    # Stop all services
+    echo -e "\033[1;33m[1/6]\033[1;37m Stopping services..."
+    service ssh stop > /dev/null 2>&1
+    service dropbear stop > /dev/null 2>&1
+    service squid stop > /dev/null 2>&1
+    service squid3 stop > /dev/null 2>&1
+    service openvpn stop > /dev/null 2>&1
+    service stunnel4 stop > /dev/null 2>&1
+    killall -9 python > /dev/null 2>&1
+    screen -wipe > /dev/null 2>&1
+
+    # Remove packages
+    echo -e "\033[1;33m[2/6]\033[1;37m Removing packages..."
     apt-get purge screen -y > /dev/null 2>&1
     apt-get purge nmap -y > /dev/null 2>&1
     apt-get purge figlet -y > /dev/null 2>&1
@@ -10,14 +39,71 @@ if [[ "$resp" = s || "$resp" = S ]];then
     apt-get purge squid3 -y > /dev/null 2>&1
     apt-get purge dropbear -y > /dev/null 2>&1
     apt-get purge apache2 -y > /dev/null 2>&1
-    rm /bin/criarusuario /bin/expcleaner /bin/sshlimiter /bin/addhost /bin/listar /bin/sshmonitor /bin/ajuda /bin/menu /bin/OpenVPN /bin/userbackup /bin/tcpspeed /bin/badvpn /bin/otimizar /bin/speedtest /bin/trafego /bin/banner /bin/limit /bin/limite /bin/senharoot /bin/reiniciarservicos /bin/reiniciarsistema /bin/attscript /bin/criarteste /bin/socks  /bin/DropBear /bin/alterarlimite /bin/alterarsenha /bin/remover /bin/detalhes /bin/mudardata /bin/botssh /bin/infousers /bin/droplimiter /bin/conexao /bin/onlineapp /bin/botteste /bin/trojan-go /bin/v2raymanager /bin/versao > /dev/null 2>&1
+    apt-get purge stunnel4 -y > /dev/null 2>&1
+    apt-get purge openvpn -y > /dev/null 2>&1
+    apt-get autoremove -y > /dev/null 2>&1
+
+    # Remove binaries
+    echo -e "\033[1;33m[3/6]\033[1;37m Removing binaries..."
+    rm -f /bin/criarusuario /bin/expcleaner /bin/sshlimiter /bin/addhost /bin/listar
+    rm -f /bin/sshmonitor /bin/ajuda /bin/menu /bin/OpenVPN /bin/userbackup /bin/tcpspeed
+    rm -f /bin/badvpn /bin/otimizar /bin/speedtest /bin/trafego /bin/banner /bin/limit
+    rm -f /bin/limite /bin/senharoot /bin/reiniciarservicos /bin/reiniciarsistema
+    rm -f /bin/attscript /bin/criarteste /bin/socks /bin/DropBear /bin/alterarlimite
+    rm -f /bin/alterarsenha /bin/remover /bin/detalhes /bin/mudardata /bin/botssh
+    rm -f /bin/infousers /bin/droplimiter /bin/conexao /bin/onlineapp /bin/botteste
+    rm -f /bin/trojan-go /bin/v2raymanager /bin/versao /bin/delscript /bin/delhost
+    rm -f /bin/slowdns /bin/blockt > /dev/null 2>&1
+
+    # Remove directories
+    echo -e "\033[1;33m[4/6]\033[1;37m Removing directories..."
     rm -rf /etc/SSHPlus > /dev/null 2>&1
+    rm -rf /etc/squid > /dev/null 2>&1
+    rm -rf /etc/squid3 > /dev/null 2>&1
+    rm -rf /etc/openvpn > /dev/null 2>&1
+    rm -rf /etc/stunnel > /dev/null 2>&1
+    rm -rf /usr/lib/sshplus > /dev/null 2>&1
+    rm -rf /usr/lib/licence > /dev/null 2>&1
+
+    # Remove configurations and files
+    echo -e "\033[1;33m[5/6]\033[1;37m Removing configurations..."
+    rm -f /etc/autostart > /dev/null 2>&1
+    rm -f /etc/Plus-torrent > /dev/null 2>&1
+    rm -f /etc/IP > /dev/null 2>&1
+    rm -f /root/.bash_history > /dev/null 2>&1
+
+    # Clean profile and bashrc
+    sed -i '/menu/d' /etc/profile > /dev/null 2>&1
+    sed -i '/SSHPlus/d' /etc/profile > /dev/null 2>&1
+    sed -i '/menu/d' ~/.bashrc > /dev/null 2>&1
+    sed -i '/SSHPlus/d' ~/.bashrc > /dev/null 2>&1
+
+    # Clear iptables rules
+    iptables -F > /dev/null 2>&1
+    iptables -X > /dev/null 2>&1
+    iptables -t nat -F > /dev/null 2>&1
+    iptables -t nat -X > /dev/null 2>&1
+    iptables -t mangle -F > /dev/null 2>&1
+    iptables -t mangle -X > /dev/null 2>&1
+
+    # Clear history
+    echo -e "\033[1;33m[6/6]\033[1;37m Clearing history..."
+    cat /dev/null > ~/.bash_history
+    history -c
+
     clear
-    echo -e "\033[1;36mThank you for using SSHPLUS MANAGER\033[1;33m"
-    sleep 2
-    cat /dev/null > ~/.bash_history && history -c && exit 0
-else
-    echo -e "\033[1;32mOk returning to menu\033[1;33m"
+    echo ""
+    echo -e "\033[1;32m╔═══════════════════════════════════════════════════╗\033[0m"
+    echo -e "\033[1;32m║  SSHPLUS Manager has been completely removed!    ║\033[0m"
+    echo -e "\033[1;32m╚═══════════════════════════════════════════════════╝\033[0m"
+    echo ""
+    echo -e "\033[1;36mThank you for using SSHPLUS MANAGER\033[0m"
+    echo ""
     sleep 3
+    exit 0
+else
+    echo ""
+    echo -e "\033[1;32mCancelled. Returning to menu...\033[0m"
+    sleep 2
     menu
 fi

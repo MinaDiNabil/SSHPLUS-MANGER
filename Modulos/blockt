@@ -119,21 +119,66 @@ done <<< "$list_ips"
 echo 'iptables -A INPUT -p icmp --icmp-type echo-request -j DROP' >> $arq
 echo 'iptables -A INPUT -p tcp --dport 10000 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 10000 -j ACCEPT' >> $arq
-echo "iptables -t nat -A PREROUTING -i $NIC -p tcp --dport 6881:6889 -j DNAT --to-dest $IP
-iptables -A FORWARD -p tcp -i $NIC --dport 6881:6889 -d $IP -j REJECT
+echo "# Block torrent ports
+iptables -A INPUT -p tcp --dport 6881:6889 -j DROP
+iptables -A INPUT -p udp --dport 6881:6889 -j DROP
 iptables -A OUTPUT -p tcp --dport 6881:6889 -j DROP
-iptables -A OUTPUT -p udp --dport 6881:6889 -j DROP" >> $arq
-echo 'iptables -A FORWARD -m string --algo bm --string "BitTorrent" -j DROP
+iptables -A OUTPUT -p udp --dport 6881:6889 -j DROP
+iptables -A FORWARD -p tcp --dport 6881:6889 -j DROP
+iptables -A FORWARD -p udp --dport 6881:6889 -j DROP
+iptables -t nat -A PREROUTING -i $NIC -p tcp --dport 6881:6889 -j DNAT --to-dest $IP
+iptables -A FORWARD -p tcp -i $NIC --dport 6881:6889 -d $IP -j REJECT" >> $arq
+
+echo '# Block additional torrent ports
+iptables -A INPUT -p tcp --dport 6969 -j DROP
+iptables -A OUTPUT -p tcp --dport 6969 -j DROP
+iptables -A FORWARD -p tcp --dport 6969 -j DROP
+iptables -A INPUT -p tcp --dport 51413 -j DROP
+iptables -A OUTPUT -p tcp --dport 51413 -j DROP
+iptables -A FORWARD -p tcp --dport 51413 -j DROP' >> $arq
+
+echo '# Block BitTorrent strings in all chains
+iptables -A INPUT -m string --algo bm --string "BitTorrent" -j DROP
+iptables -A OUTPUT -m string --algo bm --string "BitTorrent" -j DROP
+iptables -A FORWARD -m string --algo bm --string "BitTorrent" -j DROP
+iptables -A INPUT -m string --algo bm --string "BitTorrent protocol" -j DROP
+iptables -A OUTPUT -m string --algo bm --string "BitTorrent protocol" -j DROP
 iptables -A FORWARD -m string --algo bm --string "BitTorrent protocol" -j DROP
+iptables -A INPUT -m string --algo bm --string "peer_id=" -j DROP
+iptables -A OUTPUT -m string --algo bm --string "peer_id=" -j DROP
 iptables -A FORWARD -m string --algo bm --string "peer_id=" -j DROP
+iptables -A INPUT -m string --algo bm --string ".torrent" -j DROP
+iptables -A OUTPUT -m string --algo bm --string ".torrent" -j DROP
 iptables -A FORWARD -m string --algo bm --string ".torrent" -j DROP
+iptables -A INPUT -m string --algo bm --string "announce.php?passkey=" -j DROP
+iptables -A OUTPUT -m string --algo bm --string "announce.php?passkey=" -j DROP
 iptables -A FORWARD -m string --algo bm --string "announce.php?passkey=" -j DROP
+iptables -A INPUT -m string --algo bm --string "torrent" -j DROP
+iptables -A OUTPUT -m string --algo bm --string "torrent" -j DROP
 iptables -A FORWARD -m string --algo bm --string "torrent" -j DROP
+iptables -A INPUT -m string --algo bm --string "announce" -j DROP
+iptables -A OUTPUT -m string --algo bm --string "announce" -j DROP
 iptables -A FORWARD -m string --algo bm --string "announce" -j DROP
+iptables -A INPUT -m string --algo bm --string "info_hash" -j DROP
+iptables -A OUTPUT -m string --algo bm --string "info_hash" -j DROP
 iptables -A FORWARD -m string --algo bm --string "info_hash" -j DROP
+iptables -A INPUT -m string --string "get_peers" --algo bm -j DROP
+iptables -A OUTPUT -m string --string "get_peers" --algo bm -j DROP
 iptables -A FORWARD -m string --string "get_peers" --algo bm -j DROP
+iptables -A INPUT -m string --string "announce_peer" --algo bm -j DROP
+iptables -A OUTPUT -m string --string "announce_peer" --algo bm -j DROP
 iptables -A FORWARD -m string --string "announce_peer" --algo bm -j DROP
+iptables -A INPUT -m string --string "find_node" --algo bm -j DROP
+iptables -A OUTPUT -m string --string "find_node" --algo bm -j DROP
 iptables -A FORWARD -m string --string "find_node" --algo bm -j DROP' >> $arq
+
+echo '# Block DHT and tracker
+iptables -A INPUT -m string --algo bm --string "tracker" -j DROP
+iptables -A OUTPUT -m string --algo bm --string "tracker" -j DROP
+iptables -A FORWARD -m string --algo bm --string "tracker" -j DROP
+iptables -A INPUT -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP
+iptables -A OUTPUT -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP
+iptables -A FORWARD -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP' >> $arq
 sleep 2
 chmod +x $arq
 /etc/Plus-torrent > /dev/null
