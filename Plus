@@ -195,18 +195,20 @@ if [[ "$resposta" = '1' ]]; then
     # Open all necessary firewall ports
     if [[ -f "/usr/sbin/ufw" ]]; then
         ufw allow 22/tcp      # SSH
-        ufw allow 80/tcp      # HTTP
+        ufw allow 80/tcp      # HTTP / WebSocket
         ufw allow 81/tcp      # Apache alternative
         ufw allow 110/tcp     # Dropbear
         ufw allow 143/tcp     # Dropbear alternative
-        ufw allow 443/tcp     # HTTPS/SSL
+        ufw allow 443/tcp     # HTTPS/SSL Tunnel
         ufw allow 1194        # OpenVPN (TCP/UDP)
         ufw allow 3128/tcp    # Squid Proxy
         ufw allow 5300/udp    # SlowDNS
         ufw allow 7300/tcp    # BadVPN UDP Gateway
-        ufw allow 8080/tcp    # HTTP alternative
+        ufw allow 8080/tcp    # HTTP alternative / WebSocket
         ufw allow 8799/tcp    # Custom service
-        ufw allow 8888/tcp    # Additional service
+        ufw allow 8880/tcp    # WebSocket
+        ufw allow 8888/tcp    # WebSocket
+        ufw allow 9090/tcp    # SOCKS SSH
         ufw allow 53/udp      # DNS
     fi
     clear
@@ -318,18 +320,20 @@ elif [[ "$resposta" = '2' ]]; then
     # Open all necessary firewall ports
     if [[ -f "/usr/sbin/ufw" ]]; then
         ufw allow 22/tcp      # SSH
-        ufw allow 80/tcp      # HTTP
+        ufw allow 80/tcp      # HTTP / WebSocket
         ufw allow 81/tcp      # Apache alternative
         ufw allow 110/tcp     # Dropbear
         ufw allow 143/tcp     # Dropbear alternative
-        ufw allow 443/tcp     # HTTPS/SSL
+        ufw allow 443/tcp     # HTTPS/SSL Tunnel
         ufw allow 1194        # OpenVPN (TCP/UDP)
         ufw allow 3128/tcp    # Squid Proxy
         ufw allow 5300/udp    # SlowDNS
         ufw allow 7300/tcp    # BadVPN UDP Gateway
-        ufw allow 8080/tcp    # HTTP alternative
+        ufw allow 8080/tcp    # HTTP alternative / WebSocket
         ufw allow 8799/tcp    # Custom service
-        ufw allow 8888/tcp    # Additional service
+        ufw allow 8880/tcp    # WebSocket
+        ufw allow 8888/tcp    # WebSocket
+        ufw allow 9090/tcp    # SOCKS SSH
         ufw allow 53/udp      # DNS
     fi
     clear
