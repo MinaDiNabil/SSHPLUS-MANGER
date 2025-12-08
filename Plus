@@ -203,6 +203,7 @@ if [[ "$resposta" = '1' ]]; then
         ufw allow 1194        # OpenVPN (TCP/UDP)
         ufw allow 3128/tcp    # Squid Proxy
         ufw allow 5300/udp    # SlowDNS
+        ufw allow 5353/udp    # SlowDNS alternative
         ufw allow 7300/tcp    # BadVPN UDP Gateway
         ufw allow 8080/tcp    # HTTP alternative / WebSocket
         ufw allow 8799/tcp    # Custom service
@@ -328,6 +329,7 @@ elif [[ "$resposta" = '2' ]]; then
         ufw allow 1194        # OpenVPN (TCP/UDP)
         ufw allow 3128/tcp    # Squid Proxy
         ufw allow 5300/udp    # SlowDNS
+        ufw allow 5353/udp    # SlowDNS alternative
         ufw allow 7300/tcp    # BadVPN UDP Gateway
         ufw allow 8080/tcp    # HTTP alternative / WebSocket
         ufw allow 8799/tcp    # Custom service
