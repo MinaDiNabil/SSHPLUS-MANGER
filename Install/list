@@ -121,8 +121,67 @@ echo -e "\033[1;36m         AUTO-INSTALLING PROTOCOLS         \033[0m"
 echo -e "\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 echo ""
 
-# 1. Install Dropbear on ports 110 and 143
-echo -e "\033[1;33m[1/4] Installing Dropbear (ports 110, 143)...\033[0m"
+# 1. Install BadVPN on port 7300
+echo -e "\033[1;33m[1/7] Installing BadVPN (port 7300)...\033[0m"
+cd $HOME
+wget -q https://www.dropbox.com/s/tgkxdwb03r7w59r/badvpn-udpgw -O /bin/badvpn-udpgw
+chmod 777 /bin/badvpn-udpgw
+screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000
+echo -e "ps x | grep 'udpvpn' | grep -v 'grep' || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000" >> /etc/autostart
+echo -e "\033[1;32m   ✓ BadVPN installed on port 7300\033[0m"
+
+# 2. Install Squid Proxy on port 3128
+echo -e "\033[1;33m[2/7] Installing Squid Proxy (port 3128)...\033[0m"
+apt-get install squid3 -y >/dev/null 2>&1 || apt-get install squid -y >/dev/null 2>&1
+if [[ -d "/etc/squid/" ]]; then
+	var_sqd="/etc/squid/squid.conf"
+	var_pay="/etc/squid/payload.txt"
+elif [[ -d "/etc/squid3/" ]]; then
+	var_sqd="/etc/squid3/squid.conf"
+	var_pay="/etc/squid3/payload.txt"
+fi
+[[ ! -z "$var_sqd" ]] && {
+cat > $var_pay <<-PAYLOAD_EOF
+.whatsapp.net/
+.facebook.net/
+.twitter.com/
+.speedtest.net/
+PAYLOAD_EOF
+cat > $var_sqd <<-SQUID_EOF
+acl url1 dstdomain -i 127.0.0.1
+acl url2 dstdomain -i localhost
+acl url3 dstdomain -i $ipdovps
+acl url4 dstdomain -i /SSHPLUS?
+acl payload url_regex -i "$var_pay"
+acl all src 0.0.0.0/0
+
+http_access allow url1
+http_access allow url2
+http_access allow url3
+http_access allow url4
+http_access allow payload
+http_access deny all
+
+http_port 3128
+visible_hostname SSHPLUS
+via off
+forwarded_for off
+pipeline_prefetch off
+request_header_access X-Forwarded-For deny all
+request_header_access Via deny all
+request_header_access Forwarded deny all
+request_header_access Proxy-Connection deny all
+request_header_access X-Cache deny all
+request_header_access X-Cache-Lookup deny all
+request_header_access Connection deny all
+SQUID_EOF
+[[ -d "/etc/squid/" ]] && service squid restart >/dev/null 2>&1
+[[ -d "/etc/squid3/" ]] && service squid3 restart >/dev/null 2>&1
+}
+echo -e "\033[1;32m   ✓ Squid Proxy installed on port 3128\033[0m"
+
+# 3. Install Dropbear on ports 110 and 143
+echo -e "\033[1;33m[3/7] Installing Dropbear (ports 110, 143)...\033[0m"
 apt-get update -y >/dev/null 2>&1
 apt-get install dropbear -y >/dev/null 2>&1
 sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear
@@ -133,8 +192,8 @@ service dropbear start >/dev/null 2>&1
 [[ $(grep -c "/bin/false" /etc/shells) = '0' ]] && echo "/bin/false" >>/etc/shells
 echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143\033[0m"
 
-# 2. Install SSL TUNNEL on port 443 connecting to Dropbear port 110
-echo -e "\033[1;33m[2/4] Installing SSL TUNNEL (port 443 → 110)...\033[0m"
+# 4. Install SSL TUNNEL on port 443 connecting to Dropbear port 110
+echo -e "\033[1;33m[4/7] Installing SSL TUNNEL (port 443 → 110)...\033[0m"
 apt-get install stunnel4 -y >/dev/null 2>&1
 cd /etc/stunnel/
 wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/cert -O cert.pem
@@ -161,14 +220,14 @@ service stunnel4 restart >/dev/null 2>&1
 cd $HOME
 echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 → 110\033[0m"
 
-# 3. Install SOCKS SSH on port 9090
-echo -e "\033[1;33m[3/4] Installing SOCKS SSH (port 9090)...\033[0m"
+# 5. Install SOCKS SSH on port 9090
+echo -e "\033[1;33m[5/7] Installing SOCKS SSH (port 9090)...\033[0m"
 screen -dmS proxy python /etc/SSHPlus/proxy.py 9090
 echo -e "netstat -tlpn | grep -w 9090 > /dev/null || {  screen -r -S 'proxy' -X quit;  screen -dmS proxy python /etc/SSHPlus/proxy.py 9090; }" >>/etc/autostart
 echo -e "\033[1;32m   ✓ SOCKS SSH installed on port 9090\033[0m"
 
-# 4. Install WEBSOCKET on multiple ports (80, 8080, 8880, 8888) connecting to SSH port 22
-echo -e "\033[1;33m[4/4] Installing WEBSOCKET (ports 80, 8080, 8880, 8888 → 22)...\033[0m"
+# 6. Install WEBSOCKET on multiple ports (80, 8080, 8880, 8888) connecting to SSH port 22
+echo -e "\033[1;33m[6/7] Installing WEBSOCKET (ports 80, 8080, 8880, 8888 → 22)...\033[0m"
 ws_ports=(80 8080 8880 8888)
 ws_num=1
 for ws_port in "${ws_ports[@]}"; do
@@ -178,8 +237,8 @@ for ws_port in "${ws_ports[@]}"; do
 done
 echo -e "\033[1;32m   ✓ WEBSOCKET installed on ports 80, 8080, 8880, 8888 → 22\033[0m"
 
-# 5. Install SlowDNS using new script
-echo -e "\033[1;33m[5/5] Installing SlowDNS (ports 53, 5300, 5353)...\033[0m"
+# 7. Install SlowDNS using new script
+echo -e "\033[1;33m[7/7] Installing SlowDNS (ports 53, 5300, 5353)...\033[0m"
 cd /tmp
 wget -q https://raw.githubusercontent.com/MinaDiNabil/update.link/refs/heads/main/slowdns-v3.1.sh -O slowdns-install.sh
 chmod +x slowdns-install.sh
