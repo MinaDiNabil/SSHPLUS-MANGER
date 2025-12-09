@@ -132,53 +132,87 @@ echo -e "\033[1;32m   ✓ BadVPN installed on port 7300\033[0m"
 
 # 2. Install Squid Proxy on port 3128
 echo -e "\033[1;33m[2/8] Installing Squid Proxy (port 3128)...\033[0m"
+
+# Get server IP for Squid configuration
+SERVER_IP=$(cat /etc/IP 2>/dev/null || echo "$ipdovps")
+
+# Install Squid
 apt-get install squid3 -y >/dev/null 2>&1 || apt-get install squid -y >/dev/null 2>&1
+
+# Detect squid directory
 if [[ -d "/etc/squid/" ]]; then
 	var_sqd="/etc/squid/squid.conf"
 	var_pay="/etc/squid/payload.txt"
+	squid_service="squid"
 elif [[ -d "/etc/squid3/" ]]; then
 	var_sqd="/etc/squid3/squid.conf"
 	var_pay="/etc/squid3/payload.txt"
+	squid_service="squid3"
 fi
-[[ ! -z "$var_sqd" ]] && {
-cat > $var_pay <<-PAYLOAD_EOF
-.whatsapp.net/
-.facebook.net/
-.twitter.com/
-.speedtest.net/
-PAYLOAD_EOF
-cat > $var_sqd <<-SQUID_EOF
-acl url1 dstdomain -i 127.0.0.1
-acl url2 dstdomain -i localhost
-acl url3 dstdomain -i $ipdovps
-acl url4 dstdomain -i /SSHPLUS?
-acl payload url_regex -i "$var_pay"
-acl all src 0.0.0.0/0
 
-http_access allow url1
-http_access allow url2
-http_access allow url3
-http_access allow url4
-http_access allow payload
-http_access deny all
+# Configure Squid if directory exists
+if [[ ! -z "$var_sqd" ]]; then
+	# Create payload file
+	cat > $var_pay <<-PAYLOAD_EOF
+	.whatsapp.net/
+	.facebook.net/
+	.twitter.com/
+	.speedtest.net/
+	PAYLOAD_EOF
 
-http_port 3128
-visible_hostname SSHPLUS
-via off
-forwarded_for off
-pipeline_prefetch off
-request_header_access X-Forwarded-For deny all
-request_header_access Via deny all
-request_header_access Forwarded deny all
-request_header_access Proxy-Connection deny all
-request_header_access X-Cache deny all
-request_header_access X-Cache-Lookup deny all
-request_header_access Connection deny all
-SQUID_EOF
-[[ -d "/etc/squid/" ]] && service squid restart >/dev/null 2>&1
-[[ -d "/etc/squid3/" ]] && service squid3 restart >/dev/null 2>&1
-}
-echo -e "\033[1;32m   ✓ Squid Proxy installed on port 3128\033[0m"
+	# Create squid configuration
+	cat > $var_sqd <<-SQUID_EOF
+	acl url1 dstdomain -i 127.0.0.1
+	acl url2 dstdomain -i localhost
+	acl url3 dstdomain -i $SERVER_IP
+	acl url4 dstdomain -i /SSHPLUS?
+	acl payload url_regex -i "$var_pay"
+	acl all src 0.0.0.0/0
+
+	http_access allow url1
+	http_access allow url2
+	http_access allow url3
+	http_access allow url4
+	http_access allow payload
+	http_access deny all
+
+	http_port 3128
+	visible_hostname SSHPLUS
+	via off
+	forwarded_for off
+	pipeline_prefetch off
+	request_header_access X-Forwarded-For deny all
+	request_header_access Via deny all
+	request_header_access Forwarded deny all
+	request_header_access Proxy-Connection deny all
+	request_header_access X-Cache deny all
+	request_header_access X-Cache-Lookup deny all
+	request_header_access Connection deny all
+	SQUID_EOF
+
+	# Stop and restart squid service
+	systemctl stop $squid_service >/dev/null 2>&1
+	service $squid_service stop >/dev/null 2>&1
+	sleep 1
+
+	# Enable and start service
+	systemctl enable $squid_service >/dev/null 2>&1
+	systemctl start $squid_service >/dev/null 2>&1
+	service $squid_service start >/dev/null 2>&1
+	service $squid_service restart >/dev/null 2>&1
+
+	# Wait for service to start
+	sleep 2
+
+	# Verify squid is running on port 3128
+	if netstat -tlpn | grep -q ":3128"; then
+		echo -e "\033[1;32m   ✓ Squid Proxy installed on port 3128 (Active)\033[0m"
+	else
+		echo -e "\033[1;33m   ⚠ Squid Proxy installed but may need manual start\033[0m"
+	fi
+else
+	echo -e "\033[1;33m   ⚠ Squid installation attempted (directory not found)\033[0m"
+fi
 
 # 3. Install Dropbear on ports 110 and 143
 echo -e "\033[1;33m[3/8] Installing Dropbear (ports 110, 143)...\033[0m"
