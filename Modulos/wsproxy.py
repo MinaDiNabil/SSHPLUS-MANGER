@@ -149,19 +149,31 @@ class ConnectionHandler(threading.Thread):
 
     def run(self):
         try:
-            raw = self.client.recv(BUFLEN)
+            # Server-speaks-first protocols (raw SSH over SSL/TLS): the client
+            # waits for the SSH banner before sending anything, so a blocking
+            # recv here would deadlock until kexTimeout. Use a short read window
+            # to detect that case and connect to the backend immediately.
+            self.client.settimeout(0.5)
+            try:
+                raw = self.client.recv(BUFLEN)
+            except socket.timeout:
+                raw = b''
+            finally:
+                self.client.settimeout(None)
             kind = self._classify(raw)
 
             if kind == 'raw':
-                # Non-HTTP payload (raw SSH inside SSL/TLS tunnel, etc.)
+                # Non-HTTP payload (raw SSH inside SSL/TLS tunnel, etc.) or
+                # no payload yet (client waiting for server banner).
                 # Forward unmodified to the default backend without sending any HTTP response.
                 self.method = 'RAW'
                 self.log += ' - RAW ' + DEFAULT_HOST
                 self.connect_target(DEFAULT_HOST)
-                try:
-                    self.target.sendall(raw)
-                except Exception:
-                    pass
+                if raw:
+                    try:
+                        self.target.sendall(raw)
+                    except Exception:
+                        pass
                 self.client_buffer = ''
                 self.server.printLog(self.log)
                 self.doCONNECT()
