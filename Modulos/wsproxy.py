@@ -6,6 +6,8 @@ import select
 import sys
 import time
 import getopt
+import hashlib
+import base64
 
 PASS = ''
 LISTENING_ADDR = '0.0.0.0'
@@ -27,6 +29,12 @@ RESPONSE_WS = "HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n"
 RESPONSE_PROXY = "HTTP/1.1 200 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n"
 
 HTTP_METHODS = (b'GET', b'POST', b'HEAD', b'PUT', b'OPTIONS', b'DELETE', b'PATCH', b'CONNECT')
+WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+
+
+def ws_accept(key):
+    digest = hashlib.sha1((key + WS_GUID).encode('ascii')).digest()
+    return base64.b64encode(digest).decode('ascii')
 
 
 class Server(threading.Thread):
@@ -244,12 +252,31 @@ class ConnectionHandler(threading.Thread):
         self.targetClosed = False
         self.target.connect(address)
 
+    def _ws_handshake_response(self):
+        # If the client sent a real RFC 6455 handshake we must echo back a
+        # valid Sec-WebSocket-Accept; otherwise (mobile tunneling apps that
+        # only fake the upgrade) keep the legacy short 101 reply.
+        ws_key = self.findHeader(self.client_buffer, 'Sec-WebSocket-Key')
+        if ws_key:
+            ws_proto = self.findHeader(self.client_buffer, 'Sec-WebSocket-Protocol')
+            lines = [
+                'HTTP/1.1 101 Switching Protocols',
+                'Upgrade: websocket',
+                'Connection: Upgrade',
+                'Sec-WebSocket-Accept: ' + ws_accept(ws_key),
+            ]
+            if ws_proto:
+                # Echo the first offered subprotocol to satisfy strict clients
+                lines.append('Sec-WebSocket-Protocol: ' + ws_proto.split(',')[0].strip())
+            return ('\r\n'.join(lines) + '\r\n\r\n').encode('utf-8')
+        return RESPONSE_WS.encode('utf-8')
+
     def method_CONNECT(self, path):
         self.method = 'CONNECT'
         self.log += ' - WS ' + path
 
         self.connect_target(path)
-        self.client.sendall(RESPONSE_WS.encode('utf-8'))
+        self.client.sendall(self._ws_handshake_response())
         self.client_buffer = ''
 
         self.server.printLog(self.log)
