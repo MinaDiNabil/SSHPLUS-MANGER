@@ -738,8 +738,15 @@ SCOLOR='\033[0m'
 					# Count existing services
 					service_count=$(grep -c '^\[' /etc/stunnel/stunnel.conf)
 					service_name="stunnel$service_count"
-					# Add new service section
-					echo -e "\n[$service_name]\nconnect = 127.0.0.1:$portssl\naccept = ${porta}" >> /etc/stunnel/stunnel.conf
+					# Spawn a payload multiplexer for this accept port so the SSL
+					# tunnel transparently accepts SSL/TLS (SNI), WS SSL and WS Proxy.
+					sslmux_port=$((porta + 10000))
+					if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${sslmux_port}\$"; then
+						screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl
+						echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${sslmux_port}\$' || screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl" >>/etc/autostart
+					fi
+					# Add new service section pointing to the mux (not directly to SSH)
+					echo -e "\n[$service_name]\nconnect = 127.0.0.1:$sslmux_port\naccept = ${porta}" >> /etc/stunnel/stunnel.conf
 					service stunnel4 restart
 					/etc/init.d/stunnel4 restart
 				}
@@ -767,6 +774,9 @@ SCOLOR='\033[0m'
 					if [[ -n "$service_name" ]]; then
 						# Remove the entire section
 						sed -i "/^\[$service_name\]/,/^$/d" /etc/stunnel/stunnel.conf
+						# Stop the payload multiplexer paired with this accept port
+						screen -S sslmux_${porta} -X quit 2>/dev/null
+						sed -i "/sslmux_${porta} python3/d" /etc/autostart 2>/dev/null
 						service stunnel4 restart
 						/etc/init.d/stunnel4 restart
 					else
@@ -783,6 +793,11 @@ SCOLOR='\033[0m'
 				echo -e "\033[1;32mREMOVENDO O  SSL TUNNEL !\033[0m"
 				del_ssl() {
 					service stunnel4 stop
+					# Stop every SSL TUNNEL payload multiplexer
+					for s in $(screen -ls 2>/dev/null | grep '\.sslmux_' | awk '{print $1}'); do
+						screen -S "$s" -X quit 2>/dev/null
+					done
+					sed -i '/sslmux_.* python3/d' /etc/autostart 2>/dev/null
 					apt-get remove stunnel4 -y
 					apt-get autoremove stunnel4 -y
 					apt-get purge stunnel4 -y
@@ -878,6 +893,14 @@ SCOLOR='\033[0m'
 			echo -e "\n\033[1;32mCONFIGURANDO O SSL TUNNEL !\033[0m"
 			echo ""
 			ssl_conf() {
+				# Spawn the local-only payload multiplexer that lets port ${porta}
+				# accept SSL/TLS (SNI), WS SSL and WS Proxy on the same listener.
+				command -v python3 >/dev/null 2>&1 || apt-get install python3 -y >/dev/null 2>&1
+				sslmux_port=$((porta + 10000))
+				if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${sslmux_port}\$"; then
+					screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl
+					echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${sslmux_port}\$' || screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl" >>/etc/autostart
+				fi
 				cat > /etc/stunnel/stunnel.conf <<-EOF
 cert = /etc/stunnel/cert.pem
 key = /etc/stunnel/key.pem
@@ -887,7 +910,7 @@ socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 
 [stunnel]
-connect = 127.0.0.1:${portssl}
+connect = 127.0.0.1:${sslmux_port}
 accept = ${porta}
 EOF
 				chmod 644 /etc/stunnel/stunnel.conf

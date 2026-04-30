@@ -6,6 +6,8 @@ import select
 import sys
 import time
 import getopt
+import hashlib
+import base64
 
 PASS = ''
 LISTENING_ADDR = '0.0.0.0'
@@ -23,7 +25,16 @@ MSG = ''
 COR = '<font color="null">'
 FTAG = '</font>'
 DEFAULT_HOST = "127.0.0.1:" + str(SSH_PORT)
-RESPONSE = "HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n"
+RESPONSE_WS = "HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n"
+RESPONSE_PROXY = "HTTP/1.1 200 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n"
+
+HTTP_METHODS = (b'GET', b'POST', b'HEAD', b'PUT', b'OPTIONS', b'DELETE', b'PATCH', b'CONNECT')
+WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+
+
+def ws_accept(key):
+    digest = hashlib.sha1((key + WS_GUID).encode('ascii')).digest()
+    return base64.b64encode(digest).decode('ascii')
 
 
 class Server(threading.Thread):
@@ -119,35 +130,88 @@ class ConnectionHandler(threading.Thread):
         finally:
             self.targetClosed = True
 
+    def _classify(self, raw):
+        # Returns one of: 'raw', 'connect', 'ws'
+        # 'raw'     -> non-HTTP (e.g. SSH greeting "SSH-2.0-...") tunnel as-is
+        # 'connect' -> standard HTTP CONNECT proxy ("CONNECT host:port HTTP/1.1")
+        # 'ws'      -> any other HTTP request (treated as WebSocket-style payload)
+        if not raw:
+            return 'raw'
+        head = raw.split(b'\r\n', 1)[0]
+        parts = head.split(b' ')
+        if len(parts) < 3 or not parts[-1].startswith(b'HTTP/'):
+            return 'raw'
+        if parts[0].upper() not in HTTP_METHODS:
+            return 'raw'
+        if parts[0].upper() == b'CONNECT':
+            return 'connect'
+        return 'ws'
+
     def run(self):
         try:
             raw = self.client.recv(BUFLEN)
-            self.client_buffer = raw.decode('utf-8', errors='ignore')
+            kind = self._classify(raw)
 
+            if kind == 'raw':
+                # Non-HTTP payload (raw SSH inside SSL/TLS tunnel, etc.)
+                # Forward unmodified to the default backend without sending any HTTP response.
+                self.method = 'RAW'
+                self.log += ' - RAW ' + DEFAULT_HOST
+                self.connect_target(DEFAULT_HOST)
+                try:
+                    self.target.sendall(raw)
+                except Exception:
+                    pass
+                self.client_buffer = ''
+                self.server.printLog(self.log)
+                self.doCONNECT()
+                return
+
+            try:
+                self.client_buffer = raw.decode('utf-8', errors='ignore')
+            except Exception:
+                self.client_buffer = ''
+
+            if kind == 'connect':
+                # Standard HTTP CONNECT proxy (Payload + SSL/TLS + Proxy = WS Proxy)
+                head = self.client_buffer.split('\r\n', 1)[0]
+                target = head.split(' ')[1] if ' ' in head else DEFAULT_HOST
+                # Optional auth via X-Pass header
+                passwd = self.findHeader(self.client_buffer, 'X-Pass')
+                if len(PASS) != 0 and passwd != PASS:
+                    self.client.send(b'HTTP/1.1 407 Proxy Authentication Required\r\n\r\n')
+                    return
+                # Restrict to localhost backends to avoid open-proxy abuse
+                host_only = target.split(':', 1)[0]
+                if host_only not in ('127.0.0.1', 'localhost', LISTENING_ADDR):
+                    target = DEFAULT_HOST
+                self.method = 'CONNECT'
+                self.log += ' - CONNECT ' + target
+                self.connect_target(target)
+                self.client.sendall(RESPONSE_PROXY.encode('utf-8'))
+                self.client_buffer = ''
+                self.server.printLog(self.log)
+                self.doCONNECT()
+                return
+
+            # kind == 'ws' -> Payload + SSL/TLS = WS SSL (and plain WebSocket payloads)
             hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
-
             if hostPort == '':
                 hostPort = DEFAULT_HOST
 
             split = self.findHeader(self.client_buffer, 'X-Split')
-
             if split != '':
                 self.client.recv(BUFLEN)
 
-            if hostPort != '':
-                passwd = self.findHeader(self.client_buffer, 'X-Pass')
-
-                if len(PASS) != 0 and passwd == PASS:
-                    self.method_CONNECT(hostPort)
-                elif len(PASS) != 0 and passwd != PASS:
-                    self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
-                elif hostPort.startswith('127.0.0.1') or hostPort.startswith('localhost'):
-                    self.method_CONNECT(hostPort)
-                else:
-                    self.client.send(b'HTTP/1.1 403 Forbidden!\r\n\r\n')
+            passwd = self.findHeader(self.client_buffer, 'X-Pass')
+            if len(PASS) != 0 and passwd == PASS:
+                self.method_CONNECT(hostPort)
+            elif len(PASS) != 0 and passwd != PASS:
+                self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
+            elif hostPort.startswith('127.0.0.1') or hostPort.startswith('localhost'):
+                self.method_CONNECT(hostPort)
             else:
-                print('- No X-Real-Host!')
-                self.client.send(b'HTTP/1.1 400 NoXRealHost!\r\n\r\n')
+                self.client.send(b'HTTP/1.1 403 Forbidden!\r\n\r\n')
 
         except Exception as e:
             self.log += ' - error: ' + str(e)
@@ -188,11 +252,31 @@ class ConnectionHandler(threading.Thread):
         self.targetClosed = False
         self.target.connect(address)
 
+    def _ws_handshake_response(self):
+        # If the client sent a real RFC 6455 handshake we must echo back a
+        # valid Sec-WebSocket-Accept; otherwise (mobile tunneling apps that
+        # only fake the upgrade) keep the legacy short 101 reply.
+        ws_key = self.findHeader(self.client_buffer, 'Sec-WebSocket-Key')
+        if ws_key:
+            ws_proto = self.findHeader(self.client_buffer, 'Sec-WebSocket-Protocol')
+            lines = [
+                'HTTP/1.1 101 Switching Protocols',
+                'Upgrade: websocket',
+                'Connection: Upgrade',
+                'Sec-WebSocket-Accept: ' + ws_accept(ws_key),
+            ]
+            if ws_proto:
+                # Echo the first offered subprotocol to satisfy strict clients
+                lines.append('Sec-WebSocket-Protocol: ' + ws_proto.split(',')[0].strip())
+            return ('\r\n'.join(lines) + '\r\n\r\n').encode('utf-8')
+        return RESPONSE_WS.encode('utf-8')
+
     def method_CONNECT(self, path):
-        self.log += ' - CONNECT ' + path
+        self.method = 'CONNECT'
+        self.log += ' - WS ' + path
 
         self.connect_target(path)
-        self.client.sendall(RESPONSE.encode('utf-8'))
+        self.client.sendall(self._ws_handshake_response())
         self.client_buffer = ''
 
         self.server.printLog(self.log)
