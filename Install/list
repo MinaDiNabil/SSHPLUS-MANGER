@@ -206,9 +206,60 @@ RuntimeMaxUse=50M
 JOURNAL_EOF
 systemctl restart systemd-journald >/dev/null 2>&1 || true
 
+# ZRAM swap - compressed in-memory swap. Prevents OOM kills on
+# low-RAM VPS without disk I/O. Only enable when no swap exists yet
+# so we don't fight an admin-configured swapfile.
+if [[ -z "$(swapon --show=NAME --noheadings 2>/dev/null)" ]]; then
+	command -v zramctl >/dev/null 2>&1 || apt-get install zram-tools -y >/dev/null 2>&1
+	if [[ -d /etc/default ]] && dpkg -s zram-tools >/dev/null 2>&1; then
+		cat > /etc/default/zramswap <<-'ZRAM_EOF'
+		ALGO=zstd
+		PERCENT=50
+		PRIORITY=100
+		ZRAM_EOF
+		systemctl enable --now zramswap >/dev/null 2>&1 || \
+			systemctl restart zramswap >/dev/null 2>&1 || true
+	fi
+fi
+
+# SSH daemon tuning. UseDNS=no removes the 5-30s reverse-DNS stall
+# clients hit on every connect; the rest raises concurrent-session
+# ceilings appropriate for a tunneling host. Strip any pre-existing
+# copies of these directives so our values win regardless of where
+# they appear in the file (sshd uses the first occurrence).
+if [[ -f /etc/ssh/sshd_config ]]; then
+	sed -i '/# BEGIN SSHPLUS-TUNING/,/# END SSHPLUS-TUNING/d' /etc/ssh/sshd_config
+	for key in UseDNS GSSAPIAuthentication ClientAliveInterval ClientAliveCountMax TCPKeepAlive MaxStartups MaxSessions LoginGraceTime; do
+		sed -i "/^[[:space:]]*${key}[[:space:]]/d" /etc/ssh/sshd_config
+	done
+	cat >> /etc/ssh/sshd_config <<-'SSH_EOF'
+	# BEGIN SSHPLUS-TUNING
+	UseDNS no
+	GSSAPIAuthentication no
+	TCPKeepAlive yes
+	ClientAliveInterval 60
+	ClientAliveCountMax 3
+	MaxStartups 100:30:200
+	MaxSessions 50
+	LoginGraceTime 30
+	# END SSHPLUS-TUNING
+	SSH_EOF
+
+	if sshd -t 2>/dev/null; then
+		systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || \
+			service ssh reload >/dev/null 2>&1 || true
+	else
+		# Roll back on syntax error rather than risk locking the user out
+		sed -i '/# BEGIN SSHPLUS-TUNING/,/# END SSHPLUS-TUNING/d' /etc/ssh/sshd_config
+		echo -e "\033[1;31m   ✗ sshd_config validation failed; tuning rolled back.\033[0m"
+	fi
+fi
+
 # Report active congestion control so the user knows whether BBR took
 active_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-echo -e "\033[1;36m   ⚙ Tuning applied (cc=${active_cc:-unknown}, nofile=524288, journal capped)\033[0m"
+zram_state=$(swapon --show=NAME --noheadings 2>/dev/null | grep -c zram)
+[[ "$zram_state" -gt 0 ]] && zram_msg="zram=on" || zram_msg="zram=off"
+echo -e "\033[1;36m   ⚙ Tuning applied (cc=${active_cc:-unknown}, nofile=524288, ${zram_msg}, sshd tuned)\033[0m"
 
 # Auto-install protocols
 echo ""
