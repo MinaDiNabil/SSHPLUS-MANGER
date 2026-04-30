@@ -84,35 +84,182 @@ echo "$_lvk" | sed -n '1 p' | cut -d' ' -f2 >/bin/versao && cat /bin/versao >/ho
 wget https://github.com/MinaDiNabil/SSHPLUS-MANGER/raw/main/Install/jq-linux64 >/dev/null 2>&1
 chmod +x jq-linux64 && mv jq-linux64 $(which jq)
 
-# Apply system optimizations for better performance and stability
-cat >> /etc/sysctl.conf << 'SYSCTL_EOF'
-# SSHPLUS Basic Optimizations
+# Apply system optimizations for better performance and stability.
+# Use a drop-in under /etc/sysctl.d so re-running the installer never
+# duplicates lines, and so users can override anything by adding a
+# higher-numbered file. Clean up the legacy block previously appended
+# to /etc/sysctl.conf so the drop-in is the single source of truth.
+sed -i '/# SSHPLUS Basic Optimizations/,/^vm\.swappiness = 10$/d' /etc/sysctl.conf 2>/dev/null
+
+# Strip prior SSHPLUS limits.conf appendages so the drop-in is canonical
+sed -i '/^\* soft nofile 524288$/,/^root hard nofile 524288$/d' /etc/security/limits.conf 2>/dev/null
+
+# The big throughput win on tunneling servers is BBR + fq -
+# load tcp_bbr and select it only if available.
+modprobe tcp_bbr 2>/dev/null
+grep -qx tcp_bbr /etc/modules-load.d/sshplus-bbr.conf 2>/dev/null || \
+	echo tcp_bbr > /etc/modules-load.d/sshplus-bbr.conf
+
+if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+	cc_line='net.ipv4.tcp_congestion_control = bbr'
+	qdisc_line='net.core.default_qdisc = fq'
+else
+	cc_line='# bbr unavailable on this kernel; keeping default congestion control'
+	qdisc_line='# fq qdisc paired with bbr; left unset since bbr is unavailable'
+fi
+
+cat > /etc/sysctl.d/99-sshplus.conf <<SYSCTL_EOF
+# SSHPLUS - performance & stability tuning (managed by Install/list)
+
+# --- Congestion control ---
+$cc_line
+$qdisc_line
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_timestamps = 1
+
+# --- Socket buffers (raise ceilings for high-bandwidth tunnels) ---
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.optmem_max = 65536
+net.ipv4.tcp_rmem = 4096 262144 67108864
+net.ipv4.tcp_wmem = 4096 262144 67108864
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+
+# --- Connection handling ---
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = 65536
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_tw_buckets = 1440000
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_keepalive_intvl = 60
 net.ipv4.tcp_keepalive_probes = 3
+net.ipv4.tcp_syn_retries = 3
+net.ipv4.tcp_synack_retries = 2
+net.ipv4.tcp_orphan_retries = 1
+net.ipv4.tcp_retries2 = 5
 net.ipv4.ip_local_port_range = 1024 65535
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_max_syn_backlog = 8192
-net.ipv4.ip_forward = 1
-fs.file-max = 2097152
-vm.swappiness = 10
-SYSCTL_EOF
-sysctl -p >/dev/null 2>&1
 
-# Increase file descriptor limits
-cat >> /etc/security/limits.conf << 'LIMITS_EOF'
-* soft nofile 524288
-* hard nofile 524288
-root soft nofile 524288
-root hard nofile 524288
+# --- Forwarding (required for tunneling) ---
+net.ipv4.ip_forward = 1
+
+# --- Hardening that also improves stability ---
+net.ipv4.tcp_rfc1337 = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+# --- Filesystem & memory ---
+fs.file-max = 2097152
+fs.nr_open = 2097152
+vm.swappiness = 10
+vm.dirty_ratio = 10
+vm.dirty_background_ratio = 5
+
+# --- Auto-reboot on kernel panic to avoid stuck VPS ---
+kernel.panic = 10
+kernel.panic_on_oops = 1
+SYSCTL_EOF
+
+# Apply the new tunables (and reload anything in /etc/sysctl.d)
+sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-sshplus.conf >/dev/null 2>&1
+
+# File descriptor limits via drop-in (idempotent on re-run)
+cat > /etc/security/limits.d/99-sshplus.conf <<'LIMITS_EOF'
+*       soft    nofile  524288
+*       hard    nofile  524288
+root    soft    nofile  524288
+root    hard    nofile  524288
+*       soft    nproc   65535
+*       hard    nproc   65535
 LIMITS_EOF
+
+# Make sure systemd services inherit raised limits as well
+mkdir -p /etc/systemd/system.conf.d
+cat > /etc/systemd/system.conf.d/99-sshplus-limits.conf <<'SYSTEMD_EOF'
+[Manager]
+DefaultLimitNOFILE=524288
+DefaultLimitNPROC=65535
+SYSTEMD_EOF
+
+# Entropy daemon - shortens SSH/SSL key-exchange stalls on idle VPS
+command -v haveged >/dev/null 2>&1 || apt-get install haveged -y >/dev/null 2>&1
+systemctl enable --now haveged >/dev/null 2>&1 || true
+
+# Cap systemd journal so logs cannot fill the root partition
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/99-sshplus.conf <<'JOURNAL_EOF'
+[Journal]
+SystemMaxUse=200M
+SystemKeepFree=500M
+RuntimeMaxUse=50M
+JOURNAL_EOF
+systemctl restart systemd-journald >/dev/null 2>&1 || true
+
+# ZRAM swap - compressed in-memory swap. Prevents OOM kills on
+# low-RAM VPS without disk I/O. Only enable when no swap exists yet
+# so we don't fight an admin-configured swapfile.
+if [[ -z "$(swapon --show=NAME --noheadings 2>/dev/null)" ]]; then
+	command -v zramctl >/dev/null 2>&1 || apt-get install zram-tools -y >/dev/null 2>&1
+	if [[ -d /etc/default ]] && dpkg -s zram-tools >/dev/null 2>&1; then
+		cat > /etc/default/zramswap <<-'ZRAM_EOF'
+		ALGO=zstd
+		PERCENT=50
+		PRIORITY=100
+		ZRAM_EOF
+		systemctl enable --now zramswap >/dev/null 2>&1 || \
+			systemctl restart zramswap >/dev/null 2>&1 || true
+	fi
+fi
+
+# SSH daemon tuning. UseDNS=no removes the 5-30s reverse-DNS stall
+# clients hit on every connect; the rest raises concurrent-session
+# ceilings appropriate for a tunneling host. Strip any pre-existing
+# copies of these directives so our values win regardless of where
+# they appear in the file (sshd uses the first occurrence).
+if [[ -f /etc/ssh/sshd_config ]]; then
+	sed -i '/# BEGIN SSHPLUS-TUNING/,/# END SSHPLUS-TUNING/d' /etc/ssh/sshd_config
+	for key in UseDNS GSSAPIAuthentication ClientAliveInterval ClientAliveCountMax TCPKeepAlive MaxStartups MaxSessions LoginGraceTime; do
+		sed -i "/^[[:space:]]*${key}[[:space:]]/d" /etc/ssh/sshd_config
+	done
+	cat >> /etc/ssh/sshd_config <<-'SSH_EOF'
+	# BEGIN SSHPLUS-TUNING
+	UseDNS no
+	GSSAPIAuthentication no
+	TCPKeepAlive yes
+	ClientAliveInterval 60
+	ClientAliveCountMax 3
+	MaxStartups 100:30:200
+	MaxSessions 50
+	LoginGraceTime 30
+	# END SSHPLUS-TUNING
+	SSH_EOF
+
+	if sshd -t 2>/dev/null; then
+		systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || \
+			service ssh reload >/dev/null 2>&1 || true
+	else
+		# Roll back on syntax error rather than risk locking the user out
+		sed -i '/# BEGIN SSHPLUS-TUNING/,/# END SSHPLUS-TUNING/d' /etc/ssh/sshd_config
+		echo -e "\033[1;31m   ✗ sshd_config validation failed; tuning rolled back.\033[0m"
+	fi
+fi
+
+# Report active congestion control so the user knows whether BBR took
+active_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+zram_state=$(swapon --show=NAME --noheadings 2>/dev/null | grep -c zram)
+[[ "$zram_state" -gt 0 ]] && zram_msg="zram=on" || zram_msg="zram=off"
+echo -e "\033[1;36m   ⚙ Tuning applied (cc=${active_cc:-unknown}, nofile=524288, ${zram_msg}, sshd tuned)\033[0m"
 
 # Auto-install protocols
 echo ""
@@ -124,11 +271,28 @@ echo ""
 # 1. Install BadVPN on port 7300
 echo -e "\033[1;33m[1/8] Installing BadVPN (port 7300)...\033[0m"
 cd $HOME
-wget -q https://www.dropbox.com/s/tgkxdwb03r7w59r/badvpn-udpgw -O /bin/badvpn-udpgw
-chmod 777 /bin/badvpn-udpgw
-screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000
-echo -e "ps x | grep 'udpvpn' | grep -v 'grep' || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000" >> /etc/autostart
-echo -e "\033[1;32m   ✓ BadVPN installed on port 7300\033[0m"
+
+# Download badvpn-udpgw binary from this repo (reliable raw URL, not Dropbox HTML)
+wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/badvpn -O /bin/badvpn-udpgw
+
+# Verify the download is an actual ELF executable, not an HTML error page
+if ! head -c 4 /bin/badvpn-udpgw 2>/dev/null | grep -q $'\x7fELF'; then
+	echo -e "\033[1;31m   ✗ BadVPN download failed or is not an ELF binary. Skipping.\033[0m"
+	rm -f /bin/badvpn-udpgw
+elif ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
+	echo -e "\033[1;33m   ⚠ Port 7300/udp already in use. BadVPN not started.\033[0m"
+else
+	chmod 755 /bin/badvpn-udpgw
+	screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000
+	echo -e "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000" >> /etc/autostart
+
+	sleep 1
+	if ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
+		echo -e "\033[1;32m   ✓ BadVPN installed on port 7300\033[0m"
+	else
+		echo -e "\033[1;31m   ✗ BadVPN started but is not listening on 7300/udp.\033[0m"
+	fi
+fi
 
 # 2. Install Squid Proxy on port 3128
 echo -e "\033[1;33m[2/8] Installing Squid Proxy (port 3128)...\033[0m"
@@ -136,82 +300,74 @@ echo -e "\033[1;33m[2/8] Installing Squid Proxy (port 3128)...\033[0m"
 # Get server IP for Squid configuration
 SERVER_IP=$(cat /etc/IP 2>/dev/null || echo "$ipdovps")
 
-# Install Squid
-apt-get install squid3 -y >/dev/null 2>&1 || apt-get install squid -y >/dev/null 2>&1
-
-# Detect squid directory
-if [[ -d "/etc/squid/" ]]; then
-	var_sqd="/etc/squid/squid.conf"
-	var_pay="/etc/squid/payload.txt"
-	squid_service="squid"
-elif [[ -d "/etc/squid3/" ]]; then
-	var_sqd="/etc/squid3/squid.conf"
-	var_pay="/etc/squid3/payload.txt"
-	squid_service="squid3"
-fi
-
-# Configure Squid if directory exists
-if [[ ! -z "$var_sqd" ]]; then
-	# Create payload file
-	cat > $var_pay <<-PAYLOAD_EOF
-	.whatsapp.net/
-	.facebook.net/
-	.twitter.com/
-	.speedtest.net/
-	PAYLOAD_EOF
-
-	# Create squid configuration
-	cat > $var_sqd <<-SQUID_EOF
-	acl url1 dstdomain -i 127.0.0.1
-	acl url2 dstdomain -i localhost
-	acl url3 dstdomain -i $SERVER_IP
-	acl url4 dstdomain -i /SSHPLUS?
-	acl payload url_regex -i "$var_pay"
-	acl all src 0.0.0.0/0
-
-	http_access allow url1
-	http_access allow url2
-	http_access allow url3
-	http_access allow url4
-	http_access allow payload
-	http_access deny all
-
-	http_port 3128
-	visible_hostname SSHPLUS
-	via off
-	forwarded_for off
-	pipeline_prefetch off
-	request_header_access X-Forwarded-For deny all
-	request_header_access Via deny all
-	request_header_access Forwarded deny all
-	request_header_access Proxy-Connection deny all
-	request_header_access X-Cache deny all
-	request_header_access X-Cache-Lookup deny all
-	request_header_access Connection deny all
-	SQUID_EOF
-
-	# Stop and restart squid service
-	systemctl stop $squid_service >/dev/null 2>&1
-	service $squid_service stop >/dev/null 2>&1
-	sleep 1
-
-	# Enable and start service
-	systemctl enable $squid_service >/dev/null 2>&1
-	systemctl start $squid_service >/dev/null 2>&1
-	service $squid_service start >/dev/null 2>&1
-	service $squid_service restart >/dev/null 2>&1
-
-	# Wait for service to start
-	sleep 2
-
-	# Verify squid is running on port 3128
-	if netstat -tlpn | grep -q ":3128"; then
-		echo -e "\033[1;32m   ✓ Squid Proxy installed on port 3128 (Active)\033[0m"
-	else
-		echo -e "\033[1;33m   ⚠ Squid Proxy installed but may need manual start\033[0m"
-	fi
+# Skip if port 3128 is already bound
+if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)3128$'; then
+	echo -e "\033[1;33m   ⚠ Port 3128 already in use. Skipping Squid install.\033[0m"
 else
-	echo -e "\033[1;33m   ⚠ Squid installation attempted (directory not found)\033[0m"
+	# Install Squid (squid3 is obsolete on Debian 11+; fall back gracefully)
+	apt-get install squid -y >/dev/null 2>&1 || apt-get install squid3 -y >/dev/null 2>&1
+
+	# Detect squid directory and service name
+	if [[ -d "/etc/squid/" ]]; then
+		var_sqd="/etc/squid/squid.conf"
+		var_pay="/etc/squid/payload.txt"
+		squid_service="squid"
+	elif [[ -d "/etc/squid3/" ]]; then
+		var_sqd="/etc/squid3/squid.conf"
+		var_pay="/etc/squid3/payload.txt"
+		squid_service="squid3"
+	else
+		var_sqd=""
+	fi
+
+	if [[ -z "$var_sqd" ]]; then
+		echo -e "\033[1;31m   ✗ Squid installation failed (config dir not found).\033[0m"
+	else
+		# Payload regex file: domains the proxy is allowed to relay to
+		cat > $var_pay <<-PAYLOAD_EOF
+		.whatsapp.net/
+		.facebook.net/
+		.twitter.com/
+		.speedtest.net/
+		PAYLOAD_EOF
+
+		# Squid 4/5 has 'all' built-in; 'dstdomain' rejects raw IPs (use 'dst').
+		cat > $var_sqd <<-SQUID_EOF
+		acl loopback dst 127.0.0.1/32
+		acl serverip dst $SERVER_IP/32
+		acl localhost_dom dstdomain localhost
+		acl payload url_regex -i "$var_pay"
+
+		http_access allow loopback
+		http_access allow serverip
+		http_access allow localhost_dom
+		http_access allow payload
+		http_access deny all
+
+		http_port 3128
+		visible_hostname SSHPLUS
+		via off
+		forwarded_for off
+		pipeline_prefetch off
+		request_header_access X-Forwarded-For deny all
+		request_header_access Via deny all
+		request_header_access Forwarded deny all
+		request_header_access Proxy-Connection deny all
+		request_header_access X-Cache deny all
+		request_header_access X-Cache-Lookup deny all
+		request_header_access Connection deny all
+		SQUID_EOF
+
+		systemctl enable $squid_service >/dev/null 2>&1
+		systemctl restart $squid_service >/dev/null 2>&1 || service $squid_service restart >/dev/null 2>&1
+
+		sleep 2
+		if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)3128$'; then
+			echo -e "\033[1;32m   ✓ Squid Proxy installed on port 3128 (Active)\033[0m"
+		else
+			echo -e "\033[1;31m   ✗ Squid not listening on 3128. Check 'journalctl -u $squid_service'.\033[0m"
+		fi
+	fi
 fi
 
 # 3. Install Dropbear on ports 110 and 143
@@ -228,48 +384,96 @@ echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143\033[0m"
 
 # 4. Install SSL TUNNEL on port 443 connecting to OpenSSH port 22
 echo -e "\033[1;33m[4/8] Installing SSL TUNNEL (port 443 → 22)...\033[0m"
-apt-get install stunnel4 -y >/dev/null 2>&1
-cd /etc/stunnel/
-wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/cert -O cert.pem
-wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/key -O key.pem
-chmod 600 cert.pem key.pem
-sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
-cat > /etc/stunnel/stunnel.conf <<-STUNNEL_EOF
-cert = /etc/stunnel/cert.pem
-key = /etc/stunnel/key.pem
-client = no
-socket = a:SO_REUSEADDR=1
-socket = l:TCP_NODELAY=1
-socket = r:TCP_NODELAY=1
 
-[stunnel]
-connect = 127.0.0.1:22
-accept = 443
-STUNNEL_EOF
-chmod 644 /etc/stunnel/stunnel.conf
-service stunnel4 stop >/dev/null 2>&1
-service stunnel4 start >/dev/null 2>&1
-service stunnel4 restart >/dev/null 2>&1
-/etc/init.d/stunnel4 restart >/dev/null 2>&1
-cd $HOME
-echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 → 22\033[0m"
+# Pre-flight: ensure port 443 is free before installing stunnel
+if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
+	holder=$(ss -tlnpH 2>/dev/null | awk '$4 ~ /(^|:)443$/ {print $NF; exit}')
+	echo -e "\033[1;31m   ✗ Port 443 already in use${holder:+ by $holder}. Skipping SSL TUNNEL install.\033[0m"
+	echo -e "\033[1;33m     Free port 443 (e.g. stop apache2/nginx) and re-run this step.\033[0m"
+else
+	apt-get install stunnel4 -y >/dev/null 2>&1
+	cd /etc/stunnel/
+
+	# Download certificates and verify they are non-empty before continuing
+	wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/cert -O cert.pem
+	wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/key -O key.pem
+
+	if [[ ! -s /etc/stunnel/cert.pem ]] || [[ ! -s /etc/stunnel/key.pem ]]; then
+		echo -e "\033[1;31m   ✗ Failed to download stunnel cert/key. SSL TUNNEL not started.\033[0m"
+		rm -f /etc/stunnel/cert.pem /etc/stunnel/key.pem
+		cd $HOME
+	else
+		chmod 600 cert.pem key.pem
+		sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
+		cat > /etc/stunnel/stunnel.conf <<-STUNNEL_EOF
+		cert = /etc/stunnel/cert.pem
+		key = /etc/stunnel/key.pem
+		client = no
+		socket = a:SO_REUSEADDR=1
+		socket = l:TCP_NODELAY=1
+		socket = r:TCP_NODELAY=1
+
+		[stunnel]
+		connect = 127.0.0.1:22
+		accept = 443
+		STUNNEL_EOF
+		chmod 644 /etc/stunnel/stunnel.conf
+		service stunnel4 restart >/dev/null 2>&1
+		cd $HOME
+
+		sleep 1
+		if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
+			echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 → 22\033[0m"
+		else
+			echo -e "\033[1;31m   ✗ stunnel4 did not bind port 443. Check 'journalctl -u stunnel4'.\033[0m"
+		fi
+	fi
+fi
 
 # 5. Install SOCKS SSH on port 9090
 echo -e "\033[1;33m[5/8] Installing SOCKS SSH (port 9090)...\033[0m"
-screen -dmS proxy python /etc/SSHPlus/proxy.py 9090
-echo -e "netstat -tlpn | grep -w 9090 > /dev/null || {  screen -r -S 'proxy' -X quit;  screen -dmS proxy python /etc/SSHPlus/proxy.py 9090; }" >>/etc/autostart
-echo -e "\033[1;32m   ✓ SOCKS SSH installed on port 9090\033[0m"
+
+# Make sure python3 is present (proxy.py/wsproxy.py require Python 3)
+command -v python3 >/dev/null 2>&1 || apt-get install python3 -y >/dev/null 2>&1
+
+if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)9090$'; then
+	echo -e "\033[1;33m   ⚠ Port 9090 already in use. Skipping SOCKS install.\033[0m"
+else
+	screen -dmS proxy python3 /etc/SSHPlus/proxy.py 9090
+	echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)9090\$' || { screen -r -S 'proxy' -X quit 2>/dev/null; screen -dmS proxy python3 /etc/SSHPlus/proxy.py 9090; }" >>/etc/autostart
+
+	sleep 1
+	if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)9090$'; then
+		echo -e "\033[1;32m   ✓ SOCKS SSH installed on port 9090\033[0m"
+	else
+		echo -e "\033[1;31m   ✗ SOCKS SSH did not bind 9090. Check 'screen -r proxy'.\033[0m"
+	fi
+fi
 
 # 6. Install WEBSOCKET on multiple ports (80, 8080, 8880, 8888) connecting to SSH port 22
 echo -e "\033[1;33m[6/8] Installing WEBSOCKET (ports 80, 8080, 8880, 8888 → 22)...\033[0m"
 ws_ports=(80 8080 8880 8888)
 ws_num=1
+ws_started=()
+ws_skipped=()
 for ws_port in "${ws_ports[@]}"; do
-	screen -dmS ws$ws_num python /etc/SSHPlus/wsproxy.py $ws_port 22 >/dev/null 2>&1
-	echo -e "netstat -tlpn | grep -w $ws_port > /dev/null || screen -dmS ws$ws_num python /etc/SSHPlus/wsproxy.py $ws_port 22" >>/etc/autostart
+	if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${ws_port}\$"; then
+		ws_skipped+=("$ws_port")
+	else
+		screen -dmS ws$ws_num python3 /etc/SSHPlus/wsproxy.py $ws_port 22 >/dev/null 2>&1
+		echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${ws_port}\$' || screen -dmS ws$ws_num python3 /etc/SSHPlus/wsproxy.py $ws_port 22" >>/etc/autostart
+
+		sleep 1
+		if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${ws_port}\$"; then
+			ws_started+=("$ws_port")
+		else
+			ws_skipped+=("$ws_port (failed)")
+		fi
+	fi
 	((ws_num++))
 done
-echo -e "\033[1;32m   ✓ WEBSOCKET installed on ports 80, 8080, 8880, 8888 → 22\033[0m"
+[[ ${#ws_started[@]} -gt 0 ]] && echo -e "\033[1;32m   ✓ WEBSOCKET active on: ${ws_started[*]}\033[0m"
+[[ ${#ws_skipped[@]} -gt 0 ]] && echo -e "\033[1;33m   ⚠ WEBSOCKET skipped: ${ws_skipped[*]}\033[0m"
 
 # 7. Install SlowDNS using new script
 echo -e "\033[1;33m[7/8] Installing SlowDNS (ports 53, 5300, 5353)...\033[0m"
@@ -322,125 +526,64 @@ echo -e "\033[1;32m   ✓ SlowDNS installation completed\033[0m"
 # 8. Install BLOCK TORRENT (Firewall Anti-Torrent)
 echo -e "\033[1;33m[8/8] Installing BLOCK TORRENT (Firewall Anti-Torrent)...\033[0m"
 
-# Install iptables if not present
-[[ $(iptables -h 2>/dev/null | wc -l) -lt 5 ]] && apt-get install iptables -y >/dev/null 2>&1
+# Install iptables if missing
+command -v iptables >/dev/null 2>&1 || apt-get install iptables -y >/dev/null 2>&1
 
-# Get server IP and network interface
-SERVER_IP=$(wget -qO- ipv4.icanhazip.com 2>/dev/null || curl -s ipv4.icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
-NIC=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
+# Idempotent anti-torrent script using a dedicated chain (BLOCK_TORRENT)
+# hooked into FORWARD only - this is a tunneling server, so we filter
+# what passes through it without touching INPUT/OUTPUT for the host
+# itself. The script exits early when the chain is already in place,
+# making it safe to run from cron every minute via /etc/autostart.
+cat > /etc/Plus-torrent <<'FIREWALL_EOF'
+#!/bin/bash
+CHAIN=BLOCK_TORRENT
 
-# Get all listening ports
-get_ports() {
-	lsof -V -i tcp -P -n 2>/dev/null | grep -v "ESTABLISHED" | grep -v "COMMAND" | grep "LISTEN" | awk '{print $9}' | awk -F ":" '{print $2}' | sort -u
-}
+# Fast path: if the chain exists and is already hooked, do nothing
+if iptables -nL "$CHAIN" >/dev/null 2>&1 && iptables -C FORWARD -j "$CHAIN" 2>/dev/null; then
+	exit 0
+fi
 
-# Create firewall rules file
-arq="/etc/Plus-torrent"
-cat > $arq <<'FIREWALL_EOF'
-# Accept established connections
-iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -t filter -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+# Create or flush the chain so re-runs never accumulate duplicates
+if iptables -nL "$CHAIN" >/dev/null 2>&1; then
+	iptables -F "$CHAIN"
+else
+	iptables -N "$CHAIN"
+fi
 
-# Allow DNS
-iptables -A OUTPUT -p tcp --dport 53 -m state --state NEW -j ACCEPT
-iptables -A OUTPUT -p udp --dport 53 -m state --state NEW -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 67 -m state --state NEW -j ACCEPT
-iptables -A OUTPUT -p udp --dport 67 -m state --state NEW -j ACCEPT
-FIREWALL_EOF
-
-# Add rules for all listening ports
-for PORT in $(get_ports); do
-	[[ -n "$PORT" ]] && cat >> $arq <<PORTS_EOF
-iptables -A INPUT -p tcp --dport $PORT -j ACCEPT
-iptables -A INPUT -p udp --dport $PORT -j ACCEPT
-iptables -A OUTPUT -p tcp --dport $PORT -j ACCEPT
-iptables -A OUTPUT -p udp --dport $PORT -j ACCEPT
-iptables -A FORWARD -p tcp --dport $PORT -j ACCEPT
-iptables -A FORWARD -p udp --dport $PORT -j ACCEPT
-PORTS_EOF
+# Standard BitTorrent listener ports
+for proto in tcp udp; do
+	iptables -A "$CHAIN" -p "$proto" --dport 6881:6889 -j DROP
+	iptables -A "$CHAIN" -p "$proto" --dport 6969 -j DROP
+	iptables -A "$CHAIN" -p "$proto" --dport 51413 -j DROP
 done
 
-# Add torrent blocking rules
-cat >> $arq <<TORRENT_EOF
+# Wire-format signatures - specific enough to avoid hitting plain
+# HTTP traffic that happens to mention "torrent" or "tracker"
+iptables -A "$CHAIN" -m string --algo bm --string "BitTorrent protocol" -j DROP
+iptables -A "$CHAIN" -m string --algo bm --string "peer_id=" -j DROP
+iptables -A "$CHAIN" -m string --algo bm --string "info_hash=" -j DROP
+iptables -A "$CHAIN" -m string --algo bm --string "announce.php?passkey=" -j DROP
+iptables -A "$CHAIN" -m string --algo bm --string ".torrent" -j DROP
+iptables -A "$CHAIN" -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP
 
-# Block ICMP ping
-iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
+# Hook the chain into FORWARD exactly once
+iptables -C FORWARD -j "$CHAIN" 2>/dev/null || iptables -I FORWARD -j "$CHAIN"
+FIREWALL_EOF
 
-# Allow Webmin
-iptables -A INPUT -p tcp --dport 10000 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 10000 -j ACCEPT
+chmod +x /etc/Plus-torrent
+bash /etc/Plus-torrent >/dev/null 2>&1
 
-# Block torrent ports
-iptables -A INPUT -p tcp --dport 6881:6889 -j DROP
-iptables -A INPUT -p udp --dport 6881:6889 -j DROP
-iptables -A OUTPUT -p tcp --dport 6881:6889 -j DROP
-iptables -A OUTPUT -p udp --dport 6881:6889 -j DROP
-iptables -A FORWARD -p tcp --dport 6881:6889 -j DROP
-iptables -A FORWARD -p udp --dport 6881:6889 -j DROP
+# Append to autostart only if not already present (cron runs autostart
+# every minute; the script's fast-path keeps that cheap)
+if ! grep -q "/etc/Plus-torrent" /etc/autostart 2>/dev/null; then
+	echo "[[ -e /etc/Plus-torrent ]] && bash /etc/Plus-torrent >/dev/null 2>&1" >> /etc/autostart
+fi
 
-# Block additional torrent ports
-iptables -A INPUT -p tcp --dport 6969 -j DROP
-iptables -A OUTPUT -p tcp --dport 6969 -j DROP
-iptables -A FORWARD -p tcp --dport 6969 -j DROP
-iptables -A INPUT -p tcp --dport 51413 -j DROP
-iptables -A OUTPUT -p tcp --dport 51413 -j DROP
-iptables -A FORWARD -p tcp --dport 51413 -j DROP
-
-# Block BitTorrent strings
-iptables -A INPUT -m string --algo bm --string "BitTorrent" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "BitTorrent" -j DROP
-iptables -A FORWARD -m string --algo bm --string "BitTorrent" -j DROP
-iptables -A INPUT -m string --algo bm --string "BitTorrent protocol" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "BitTorrent protocol" -j DROP
-iptables -A FORWARD -m string --algo bm --string "BitTorrent protocol" -j DROP
-iptables -A INPUT -m string --algo bm --string "peer_id=" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "peer_id=" -j DROP
-iptables -A FORWARD -m string --algo bm --string "peer_id=" -j DROP
-iptables -A INPUT -m string --algo bm --string ".torrent" -j DROP
-iptables -A OUTPUT -m string --algo bm --string ".torrent" -j DROP
-iptables -A FORWARD -m string --algo bm --string ".torrent" -j DROP
-iptables -A INPUT -m string --algo bm --string "announce.php?passkey=" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "announce.php?passkey=" -j DROP
-iptables -A FORWARD -m string --algo bm --string "announce.php?passkey=" -j DROP
-iptables -A INPUT -m string --algo bm --string "torrent" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "torrent" -j DROP
-iptables -A FORWARD -m string --algo bm --string "torrent" -j DROP
-iptables -A INPUT -m string --algo bm --string "announce" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "announce" -j DROP
-iptables -A FORWARD -m string --algo bm --string "announce" -j DROP
-iptables -A INPUT -m string --algo bm --string "info_hash" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "info_hash" -j DROP
-iptables -A FORWARD -m string --algo bm --string "info_hash" -j DROP
-iptables -A INPUT -m string --string "get_peers" --algo bm -j DROP
-iptables -A OUTPUT -m string --string "get_peers" --algo bm -j DROP
-iptables -A FORWARD -m string --string "get_peers" --algo bm -j DROP
-iptables -A INPUT -m string --string "announce_peer" --algo bm -j DROP
-iptables -A OUTPUT -m string --string "announce_peer" --algo bm -j DROP
-iptables -A FORWARD -m string --string "announce_peer" --algo bm -j DROP
-iptables -A INPUT -m string --string "find_node" --algo bm -j DROP
-iptables -A OUTPUT -m string --string "find_node" --algo bm -j DROP
-iptables -A FORWARD -m string --string "find_node" --algo bm -j DROP
-
-# Block DHT and tracker
-iptables -A INPUT -m string --algo bm --string "tracker" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "tracker" -j DROP
-iptables -A FORWARD -m string --algo bm --string "tracker" -j DROP
-iptables -A INPUT -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP
-iptables -A OUTPUT -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP
-iptables -A FORWARD -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP
-TORRENT_EOF
-
-# Make executable and apply rules
-chmod +x $arq
-bash $arq >/dev/null 2>&1
-
-# Add to autostart to apply on reboot
-echo "# Apply torrent blocking on boot" >> /etc/autostart
-echo "[[ -e /etc/Plus-torrent ]] && bash /etc/Plus-torrent >/dev/null 2>&1" >> /etc/autostart
-
-echo -e "\033[1;32m   ✓ BLOCK TORRENT enabled (Anti-Torrent Firewall active)\033[0m"
+if iptables -nL BLOCK_TORRENT >/dev/null 2>&1; then
+	echo -e "\033[1;32m   ✓ BLOCK TORRENT enabled (BLOCK_TORRENT chain → FORWARD)\033[0m"
+else
+	echo -e "\033[1;31m   ✗ BLOCK TORRENT chain creation failed.\033[0m"
+fi
 
 echo ""
 echo -e "\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
