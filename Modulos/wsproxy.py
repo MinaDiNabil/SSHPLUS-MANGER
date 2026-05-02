@@ -220,10 +220,16 @@ class ConnectionHandler(threading.Thread):
                 self.method_CONNECT(hostPort)
             elif len(PASS) != 0 and passwd != PASS:
                 self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
-            elif hostPort.startswith('127.0.0.1') or hostPort.startswith('localhost'):
-                self.method_CONNECT(hostPort)
             else:
-                self.client.send(b'HTTP/1.1 403 Forbidden!\r\n\r\n')
+                # Mobile tunneling apps usually put the server's public IP or
+                # domain in X-Real-Host. Always target the local SSH backend
+                # regardless of what the client sent: this keeps the proxy
+                # closed (no open-proxy abuse) while still accepting every
+                # client payload instead of replying 403.
+                if not (hostPort.startswith('127.0.0.1')
+                        or hostPort.startswith('localhost')):
+                    hostPort = DEFAULT_HOST
+                self.method_CONNECT(hostPort)
 
         except Exception as e:
             self.log += ' - error: ' + str(e)
