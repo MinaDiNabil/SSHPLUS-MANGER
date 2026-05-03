@@ -50,13 +50,19 @@ useradd -M -s /bin/false $nome
 (echo $pass;echo $pass) |passwd $nome > /dev/null 2>&1
 echo "$pass" > /etc/SSHPlus/senha/$nome
 echo "$nome $limit" >> /root/usuarios.db
-echo "#!/bin/bash
-pkill -f "$nome"
+# Use a single-quoted heredoc so $nome (already validated) is the
+# only variable expanded, and use `pkill -KILL -u` so the test user's
+# expiry only kills processes owned by them — not unrelated daemons
+# that happen to contain the username as a substring of their cmdline.
+cat > /etc/SSHPlus/userteste/$nome.sh <<EOF
+#!/bin/bash
+pkill -KILL -u "$nome" 2>/dev/null
 userdel --force $nome
-grep -v ^$nome[[:space:]] /root/usuarios.db > /tmp/ph ; cat /tmp/ph > /root/usuarios.db
+grep -v "^$nome[[:space:]]" /root/usuarios.db > /tmp/ph ; cat /tmp/ph > /root/usuarios.db
 rm /etc/SSHPlus/senha/$nome > /dev/null 2>&1
 rm -rf /etc/SSHPlus/userteste/$nome.sh
-exit" > /etc/SSHPlus/userteste/$nome.sh
+exit
+EOF
 chmod +x /etc/SSHPlus/userteste/$nome.sh
 at -f /etc/SSHPlus/userteste/$nome.sh now + $u_temp min > /dev/null 2>&1
 clear

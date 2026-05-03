@@ -56,12 +56,16 @@ fun_bar 'install_pkgs'
 echo ""
 echo -e "CONFIGURING IPTABLES..."
 ipt_set () {
-cd /etc
-rm -rf rc.local
-wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Slowdns/rc.local
+# Append the SlowDNS startup hook instead of overwriting rc.local
+# (OpenVPN, blockt and others write into the same file).
+if [[ ! -f /etc/rc.local ]]; then
+	printf '#!/bin/sh -e\n\nexit 0\n' > /etc/rc.local
+fi
 chmod +x /etc/rc.local
-systemctl enable rc-local
-systemctl start rc-local
+sed -i '/# BEGIN SLOWDNS/,/# END SLOWDNS/d' /etc/rc.local
+sed -i '/^exit 0/i # BEGIN SLOWDNS\niptables -I INPUT -p udp --dport 5300 -j ACCEPT\niptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300\ncd /etc/slowdns \&\& ./startdns\ncd\n# END SLOWDNS' /etc/rc.local
+systemctl enable rc-local 2>/dev/null
+systemctl start rc-local 2>/dev/null
 }
 fun_bar 'ipt_set'
 clear

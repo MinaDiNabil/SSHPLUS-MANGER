@@ -63,8 +63,15 @@ fun_bar 'fun_ports'
 echo -e "SETTING CLOUDFLARE DNS..."
 echo ""
 fun_dnscf () {
-sudo systemctl disable systemd-resolved.service && sudo systemctl stop systemd-resolved.service && sudo mv /etc/resolv.conf /etc/resolv.conf.bkp && echo "nameserver 1.1.1.1" > /etc/resolv.conf
-sudo systemctl enable systemd-resolved.service && sudo systemctl start systemd-resolved.service
+# Stop and DISABLE systemd-resolved permanently. Re-enabling it would
+# re-bind 127.0.0.53:53 and clobber /etc/resolv.conf back to a stub
+# symlink, which collides with the SlowDNS server's port-53 redirect
+# and silently breaks every SlowDNS tunnel.
+sudo systemctl stop systemd-resolved.service 2>/dev/null
+sudo systemctl disable systemd-resolved.service 2>/dev/null
+[[ -L /etc/resolv.conf ]] && sudo rm -f /etc/resolv.conf
+[[ -e /etc/resolv.conf && ! -e /etc/resolv.conf.bkp ]] && sudo mv /etc/resolv.conf /etc/resolv.conf.bkp
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
 sleep 2
 }
 fun_bar 'fun_dnscf'

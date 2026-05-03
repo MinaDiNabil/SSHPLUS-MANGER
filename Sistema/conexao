@@ -924,7 +924,11 @@ SCOLOR='\033[0m'
 				rm -f /etc/stunnel/openssl.cnf
 				chmod 600 cert.pem key.pem
 				# Enable stunnel4 service
-				sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
+				if grep -qE '^[# ]*ENABLED=' /etc/default/stunnel4 2>/dev/null; then
+					sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+				else
+					echo 'ENABLED=1' >> /etc/default/stunnel4
+				fi
 				cd $HOME
 			}
 			fun_bar 'ssl_certif'
@@ -1536,7 +1540,7 @@ management localhost 7505
 verb 3
 crl-verify crl.pem
 client-to-client
-client-cert-not-required
+verify-client-cert none
 username-as-common-name
 plugin $(find /usr -type f -name 'openvpn-plugin-auth-pam.so') login
 duplicate-cn" >>/etc/openvpn/server.conf
@@ -1559,9 +1563,13 @@ exit 0' >$RCLOCAL
 					firewall-cmd --permanent --zone=trusted --add-source=10.8.0.0/24
 				fi
 				if iptables -L -n | grep -qE 'REJECT|DROP'; then
+					# Insert at the head of each chain so the OpenVPN ACCEPTs
+					# short-circuit any REJECT/DROP placed later. Do NOT flush
+					# the filter table here — that used to wipe SSH/Dropbear/
+					# stunnel rules and silently kill every active tunnel the
+					# moment a user installed OpenVPN.
 					iptables -I INPUT -p $PROTOCOL --dport $porta -j ACCEPT
 					iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT
-					iptables -F
 					iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 					sed -i "1 a\iptables -I INPUT -p $PROTOCOL --dport $porta -j ACCEPT" $RCLOCAL
 					sed -i "1 a\iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT" $RCLOCAL
