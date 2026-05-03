@@ -323,12 +323,26 @@ else
 	if [[ -z "$var_sqd" ]]; then
 		echo -e "\033[1;31m   ✗ Squid installation failed (config dir not found).\033[0m"
 	else
-		# Payload regex file: domains the proxy is allowed to relay to
+		# Bug-host allow list for plain-HTTP requests through Squid.
+		# CONNECT (HTTPS) to any destination is allowed unconditionally
+		# below — these entries only matter for non-encrypted GET/POST
+		# payloads that mobile injectors send to zero-rated domains.
+		# Add one host or .domain per line; ".example.com" matches both
+		# example.com and every subdomain.
 		cat > $var_pay <<-PAYLOAD_EOF
-		.whatsapp.net/
-		.facebook.net/
-		.twitter.com/
-		.speedtest.net/
+		.whatsapp.net
+		.whatsapp.com
+		.facebook.net
+		.facebook.com
+		.twitter.com
+		.speedtest.net
+		# Common payment / banking gateways used as bug hosts
+		.islamicbank.ps
+		.gateway.mastercard.com
+		.gbp.ma
+		# Captcha CDN endpoints commonly used as bug hosts
+		.hcaptcha.com
+		.recaptcha.net
 		PAYLOAD_EOF
 
 		# Pick a service user that is sure to exist on Debian (proxy) and
@@ -352,11 +366,30 @@ else
 		fi
 
 		# Squid 4/5 has 'all' built-in; 'dstdomain' rejects raw IPs (use 'dst').
+		#
+		# Allow CONNECT (HTTPS) to any destination on a safe TCP port —
+		# the request body is encrypted so Squid cannot be abused to
+		# inject content, and this is what makes bug-host SNIs
+		# (paysecure.islamicbank.ps, *.gateway.mastercard.com,
+		# hcaptcha endpoints, ...) work. Plain HTTP (GET/POST/HEAD)
+		# is still restricted to the server itself and to the bug-host
+		# list in $var_pay so the proxy cannot be used as an open HTTP
+		# relay.
 		cat > $var_sqd <<-SQUID_EOF
+		acl SSL_ports port 443 8443
+		acl Safe_ports port 80 443 1025-65535
+		acl CONNECT method CONNECT
+
 		acl loopback dst 127.0.0.1/32
 		acl serverip dst $SERVER_IP/32
 		acl localhost_dom dstdomain localhost
 		acl payload url_regex -i "$var_pay"
+
+		# Hard safety: never CONNECT to a port outside Safe_ports
+		# (blocks abuse like CONNECT 25 for spam relays) but allow
+		# any CONNECT destination on a safe port, especially 443.
+		http_access deny CONNECT !Safe_ports
+		http_access allow CONNECT Safe_ports
 
 		http_access allow loopback
 		http_access allow serverip
