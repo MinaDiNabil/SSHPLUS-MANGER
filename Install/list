@@ -331,6 +331,26 @@ else
 		.speedtest.net/
 		PAYLOAD_EOF
 
+		# Pick a service user that is sure to exist on Debian (proxy) and
+		# RHEL/CentOS (squid). The init script chowns /var/run/squid* to
+		# this account; if the directive is missing it falls back to
+		# something brittle.
+		if id -u proxy >/dev/null 2>&1; then
+			squid_user="proxy"
+		elif id -u squid >/dev/null 2>&1; then
+			squid_user="squid"
+		else
+			squid_user="nobody"
+		fi
+		# Pid file path differs per distro; declaring it explicitly stops
+		# `service ... reload` from claiming the daemon is down because
+		# it can't find the pid.
+		if [[ "$squid_service" == "squid3" ]]; then
+			squid_pid="/var/run/squid3.pid"
+		else
+			squid_pid="/var/run/squid.pid"
+		fi
+
 		# Squid 4/5 has 'all' built-in; 'dstdomain' rejects raw IPs (use 'dst').
 		cat > $var_sqd <<-SQUID_EOF
 		acl loopback dst 127.0.0.1/32
@@ -346,6 +366,8 @@ else
 
 		http_port 3128
 		visible_hostname SSHPLUS
+		cache_effective_user $squid_user
+		pid_filename $squid_pid
 		via off
 		forwarded_for off
 		pipeline_prefetch off
@@ -444,7 +466,11 @@ else
 		cd $HOME
 	else
 		chmod 600 cert.pem key.pem
-		sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
+		if grep -qE '^[# ]*ENABLED=' /etc/default/stunnel4 2>/dev/null; then
+			sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+		else
+			echo 'ENABLED=1' >> /etc/default/stunnel4
+		fi
 
 		# Start the local-only payload multiplexer (wsproxy) on 127.0.0.1:700 -> SSH:22
 		if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
@@ -529,15 +555,23 @@ echo -e "\033[1;33m[7/8] Installing SlowDNS (ports 53, 5300, 5353)...\033[0m"
 systemctl stop systemd-resolved >/dev/null 2>&1
 systemctl disable systemd-resolved >/dev/null 2>&1
 
+# Drop any leftover immutable flag from a previous install. Keeping the
+# file immutable would prevent OpenVPN's update-resolv-conf, netplan and
+# the user from ever fixing DNS again, so re-write it on every install
+# and leave it mutable.
+chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
+
+# /etc/resolv.conf is often a symlink to a stub maintained by another
+# resolver (systemd-resolved, NetworkManager). Replace it with a real
+# file so our nameservers actually take effect.
+[[ -L /etc/resolv.conf ]] && rm -f /etc/resolv.conf
+
 # Configure DNS resolution without systemd-resolved
 cat > /etc/resolv.conf <<-DNS_EOF
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 nameserver 8.8.4.4
 DNS_EOF
-
-# Make resolv.conf immutable to prevent systemd-resolved from overwriting it
-chattr +i /etc/resolv.conf >/dev/null 2>&1 || true
 
 # Install SlowDNS
 cd /tmp

@@ -160,7 +160,9 @@ class ConnectionHandler(threading.Thread):
             # waits for the SSH banner before sending anything, so a blocking
             # recv here would deadlock until kexTimeout. Use a short read window
             # to detect that case and connect to the backend immediately.
-            self.client.settimeout(0.5)
+            # 2 s is well below KEX timeout but tolerant of slow mobile networks
+            # whose first packet may not arrive within 500 ms.
+            self.client.settimeout(2.0)
             try:
                 raw = self.client.recv(BUFLEN)
             except socket.timeout:
@@ -227,10 +229,15 @@ class ConnectionHandler(threading.Thread):
                 self.method_CONNECT(hostPort)
             elif len(PASS) != 0 and passwd != PASS:
                 self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
-            elif hostPort.startswith('127.0.0.1') or hostPort.startswith('localhost'):
-                self.method_CONNECT(hostPort)
             else:
-                self.client.send(b'HTTP/1.1 403 Forbidden!\r\n\r\n')
+                # Mirror the CONNECT branch: don't reject non-local hosts
+                # (mobile injectors routinely send the server's public IP
+                # or domain). Just transparently rewrite the target so the
+                # proxy still cannot be abused as an open relay.
+                host_only = hostPort.split(':', 1)[0]
+                if host_only not in ('127.0.0.1', 'localhost', LISTENING_ADDR):
+                    hostPort = DEFAULT_HOST
+                self.method_CONNECT(hostPort)
 
         except Exception as e:
             self.log += ' - error: ' + str(e)
@@ -240,19 +247,16 @@ class ConnectionHandler(threading.Thread):
             self.server.removeConn(self)
 
     def findHeader(self, head, header):
-        aux = head.find(header + ': ')
-
-        if aux == -1:
-            return ''
-
-        aux = head.find(':', aux)
-        head = head[aux + 2:]
-        aux = head.find('\r\n')
-
-        if aux == -1:
-            return ''
-
-        return head[:aux]
+        # Case-insensitive header lookup, tolerant of any whitespace
+        # between the colon and the value (real-world injectors lowercase
+        # header names and sometimes drop the space after the colon).
+        for line in head.split('\r\n'):
+            if ':' not in line:
+                continue
+            name, _, value = line.partition(':')
+            if name.strip().lower() == header.lower():
+                return value.strip()
+        return ''
 
     def connect_target(self, host):
         i = host.find(':')

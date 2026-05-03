@@ -924,7 +924,11 @@ SCOLOR='\033[0m'
 				rm -f /etc/stunnel/openssl.cnf
 				chmod 600 cert.pem key.pem
 				# Enable stunnel4 service
-				sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
+				if grep -qE '^[# ]*ENABLED=' /etc/default/stunnel4 2>/dev/null; then
+					sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+				else
+					echo 'ENABLED=1' >> /etc/default/stunnel4
+				fi
 				cd $HOME
 			}
 			fun_bar 'ssl_certif'
@@ -1536,7 +1540,7 @@ management localhost 7505
 verb 3
 crl-verify crl.pem
 client-to-client
-client-cert-not-required
+verify-client-cert none
 username-as-common-name
 plugin $(find /usr -type f -name 'openvpn-plugin-auth-pam.so') login
 duplicate-cn" >>/etc/openvpn/server.conf

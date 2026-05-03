@@ -123,20 +123,22 @@ class ConnectionHandler(threading.Thread):
             if split != '':
                 self.client.recv(BUFLEN)
 
-            if hostPort != '':
-                passwd = self.findHeader(self.client_buffer, 'X-Pass')
+            passwd = self.findHeader(self.client_buffer, 'X-Pass')
 
-                if len(PASS) != 0 and passwd == PASS:
-                    self.method_CONNECT(hostPort)
-                elif len(PASS) != 0 and passwd != PASS:
-                    self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
-                elif hostPort.startswith(IP):
-                    self.method_CONNECT(hostPort)
-                else:
-                    self.client.send(b'HTTP/1.1 403 Forbidden!\r\n\r\n')
+            if len(PASS) != 0 and passwd == PASS:
+                self.method_CONNECT(hostPort)
+            elif len(PASS) != 0 and passwd != PASS:
+                self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
             else:
-                print('- No X-Real-Host!')
-                self.client.send(b'HTTP/1.1 400 NoXRealHost!\r\n\r\n')
+                # Mobile injectors routinely set X-Real-Host to the
+                # server's public IP or domain. Replying 403 there breaks
+                # the tunnel for every such client. Keep the proxy closed
+                # (no open-proxy abuse) by transparently rewriting any
+                # non-local target to DEFAULT_HOST instead of rejecting.
+                host_only = hostPort.split(':', 1)[0]
+                if host_only not in ('127.0.0.1', 'localhost', IP):
+                    hostPort = DEFAULT_HOST
+                self.method_CONNECT(hostPort)
 
         except Exception:
             pass
@@ -145,19 +147,16 @@ class ConnectionHandler(threading.Thread):
             self.server.removeConn(self)
 
     def findHeader(self, head, header):
-        aux = head.find(header + ': ')
-
-        if aux == -1:
-            return ''
-
-        aux = head.find(':', aux)
-        head = head[aux + 2:]
-        aux = head.find('\r\n')
-
-        if aux == -1:
-            return ''
-
-        return head[:aux]
+        # Case-insensitive header lookup, tolerant of any whitespace
+        # between the colon and the value (real-world injectors lowercase
+        # header names and sometimes drop the space after the colon).
+        for line in head.split('\r\n'):
+            if ':' not in line:
+                continue
+            name, _, value = line.partition(':')
+            if name.strip().lower() == header.lower():
+                return value.strip()
+        return ''
 
     def connect_target(self, host):
         i = host.find(':')

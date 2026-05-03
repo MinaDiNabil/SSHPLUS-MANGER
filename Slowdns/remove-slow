@@ -35,14 +35,28 @@ fun_bar 'fun_stop'
 echo ""
 echo -e "Removendo SlowDNS"
 fun_rm () {
-rm /etc/rc.local; mv /etc/rc.local.bkp /etc/rc.local
+# Remove only the SlowDNS block from rc.local. Restoring the .bkp
+# would clobber anything other modules (OpenVPN, blockt) added since
+# install. If the marker isn't present, fall back to the .bkp restore
+# for legacy installs that pre-date the marker.
+if [[ -f /etc/rc.local ]] && grep -q '# BEGIN SLOWDNS' /etc/rc.local; then
+	sed -i '/# BEGIN SLOWDNS/,/# END SLOWDNS/d' /etc/rc.local
+elif [[ -f /etc/rc.local.bkp ]]; then
+	mv -f /etc/rc.local.bkp /etc/rc.local
+fi
+# Drop the iptables hooks live so a reboot isn't required.
+iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null
+iptables -D INPUT -p udp --dport 5300 -j ACCEPT 2>/dev/null
 sleep 1.5
 }
 fun_bar 'fun_rm'
 echo ""
 fun_revdns () {
+[[ -L /etc/resolv.conf ]] && rm -f /etc/resolv.conf
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
-systemctl enable systemd-resolved.service && systemctl start systemd-resolved.service &&
+# Don't re-enable systemd-resolved here: if the user runs SSHPLUS the
+# install/list disabled it on purpose to free port 53 for SlowDNS or
+# our other tunnels.
 sleep 1.5
 }
 fun_bar 'fun_revdns'

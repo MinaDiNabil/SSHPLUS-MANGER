@@ -153,12 +153,13 @@ iptables -A FORWARD -m string --algo bm --string ".torrent" -j DROP
 iptables -A INPUT -m string --algo bm --string "announce.php?passkey=" -j DROP
 iptables -A OUTPUT -m string --algo bm --string "announce.php?passkey=" -j DROP
 iptables -A FORWARD -m string --algo bm --string "announce.php?passkey=" -j DROP
-iptables -A INPUT -m string --algo bm --string "torrent" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "torrent" -j DROP
-iptables -A FORWARD -m string --algo bm --string "torrent" -j DROP
-iptables -A INPUT -m string --algo bm --string "announce" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "announce" -j DROP
-iptables -A FORWARD -m string --algo bm --string "announce" -j DROP
+# Bare "torrent"/"announce" string matches were catastrophic: they
+# also dropped legitimate HTTP traffic to *torrent*freak.com, sites
+# whose URL or response body contained "torrent", and analytics-tagged
+# pages with the substring "tracker" or "announce" anywhere. Limit
+# blocking to BitTorrent-specific signatures (info_hash, peer_id,
+# d1:ad2:id20:, .torrent extension, announce.php?passkey=, the DHT
+# KRPC tokens below).
 iptables -A INPUT -m string --algo bm --string "info_hash" -j DROP
 iptables -A OUTPUT -m string --algo bm --string "info_hash" -j DROP
 iptables -A FORWARD -m string --algo bm --string "info_hash" -j DROP
@@ -172,10 +173,7 @@ iptables -A INPUT -m string --string "find_node" --algo bm -j DROP
 iptables -A OUTPUT -m string --string "find_node" --algo bm -j DROP
 iptables -A FORWARD -m string --string "find_node" --algo bm -j DROP' >> $arq
 
-echo '# Block DHT and tracker
-iptables -A INPUT -m string --algo bm --string "tracker" -j DROP
-iptables -A OUTPUT -m string --algo bm --string "tracker" -j DROP
-iptables -A FORWARD -m string --algo bm --string "tracker" -j DROP
+echo '# Block DHT (BitTorrent KRPC handshake) — narrow match, no false positives
 iptables -A INPUT -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP
 iptables -A OUTPUT -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP
 iptables -A FORWARD -p udp -m string --algo bm --string "d1:ad2:id20:" -j DROP' >> $arq

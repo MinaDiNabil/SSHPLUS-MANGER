@@ -52,7 +52,7 @@ else
 			else
 				echo ""
 				tput setaf 7 ; tput setab 4 ; tput bold ; echo "User connected. Disconnecting..." ; tput sgr0
-				pkill -f $user
+				pkill -KILL -u "$user" 2>/dev/null
 				echo "$user:$password" | chpasswd
 				tput setaf 7 ; tput setab 1 ; tput bold ; echo "" ; echo "The password for user $user was changed to: $password" ; echo "" ; tput sgr0
 				echo "$password" > /etc/SSHPlus/senha/$user

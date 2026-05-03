@@ -235,6 +235,7 @@ SCOLOR='\033[0m'
 			fun_conexao
 		}
 		verif_ptrs $pt
+		[[ -f "/usr/sbin/ufw" ]] && ufw allow ${pt}/tcp >/dev/null 2>&1
 		echo -e "\n\033[1;32mADDING PORT TO SQUID!"
 		echo ""
 		sed -i "s/#Portas/#Portas\nhttp_port $pt/g" $var_sqd
@@ -384,6 +385,7 @@ SCOLOR='\033[0m'
 					fun_drop
 				}
 				verif_ptrs $pt
+				[[ -f "/usr/sbin/ufw" ]] && ufw allow ${pt}/tcp >/dev/null 2>&1
 				echo -e "\n\033[1;32mADDING PORT TO DROPBEAR\033[0m"
 				echo ""
 				fun_addpdrop() {
@@ -479,6 +481,7 @@ SCOLOR='\033[0m'
 					fun_conexao
 				}
 				verif_ptrs $porta
+				[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/tcp >/dev/null 2>&1
 				echo -e "\n\033[1;32mINSTALLING DROPBEAR!\033[0m"
 				echo ""
 				fun_instdrop() {
@@ -797,10 +800,17 @@ SCOLOR='\033[0m'
 				echo -e "\n\033[1;32mREMOVING PORT FROM SSL TUNNEL\033[0m"
 				echo ""
 				fun_delssl() {
-					# Find and remove the service section with this port
-					service_name=$(grep -B 2 "accept = $porta" /etc/stunnel/stunnel.conf | grep '^\[' | tr -d '[]')
+					# Find the section that owns this accept port. Match the
+					# accept line exactly: `grep "accept = $porta"` would also
+					# pick up `accept = ${porta}0` (e.g. removing 8 would hit
+					# 8443) and `grep -B 2` could capture the wrong [section]
+					# header for sections longer than two lines.
+					service_name=$(awk -v p="$porta" '
+						/^\[/ { name=$0; sub(/^\[/, "", name); sub(/\].*/, "", name) }
+						$1=="accept" && $2=="=" && $3==p { print name; exit }
+					' /etc/stunnel/stunnel.conf)
 					if [[ -n "$service_name" ]]; then
-						# Remove the entire section
+						# Remove the whole section up to the next blank line.
 						sed -i "/^\[$service_name\]/,/^$/d" /etc/stunnel/stunnel.conf
 						# Stop the payload multiplexer paired with this accept port
 						screen -S sslmux_${porta} -X quit 2>/dev/null
@@ -984,7 +994,12 @@ SCOLOR='\033[0m'
 				rm -f /etc/stunnel/openssl.cnf
 				chmod 600 cert.pem key.pem
 				# Enable stunnel4 service
-				sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
+				# Tolerate `ENABLED=0`, `ENABLED="0"`, `# ENABLED=0`, etc.
+				if grep -qE '^[# ]*ENABLED=' /etc/default/stunnel4 2>/dev/null; then
+					sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+				else
+					echo 'ENABLED=1' >> /etc/default/stunnel4
+				fi
 				cd $HOME
 			}
 			fun_bar 'ssl_certif'
@@ -1494,6 +1509,10 @@ EOF
 			else
 				PROTOCOL=tcp
 			fi
+			# Open the OpenVPN port in UFW once the protocol is known so
+			# external clients can actually reach it on UFW-enabled VPS
+			# images.
+			[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/${PROTOCOL} >/dev/null 2>&1
 			echo ""
 			[[ "$OS" = 'debian' ]] && {
 				echo -e "\033[1;32mUPDATING SYSTEM"
@@ -1599,14 +1618,16 @@ management localhost 7505
 verb 3
 crl-verify crl.pem
 client-to-client
-client-cert-not-required
+verify-client-cert none
 username-as-common-name
 plugin $(find /usr -type f -name 'openvpn-plugin-auth-pam.so') login
 duplicate-cn" >>/etc/openvpn/server.conf
-				sed -i '/\<net.ipv4.ip_forward\>/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
-				if ! grep -q "\<net.ipv4.ip_forward\>" /etc/sysctl.conf; then
-					echo 'net.ipv4.ip_forward=1' >>/etc/sysctl.conf
-				fi
+				# Persist ip_forward in a drop-in. Modern installs use
+				# /etc/sysctl.d/* and the SSHPLUS installer no longer
+				# touches /etc/sysctl.conf directly, so writing there is
+				# fragile (a future install run could wipe the line).
+				echo 'net.ipv4.ip_forward=1' >/etc/sysctl.d/99-sshplus-openvpn.conf
+				sysctl -p /etc/sysctl.d/99-sshplus-openvpn.conf >/dev/null 2>&1
 				echo 1 >/proc/sys/net/ipv4/ip_forward
 				if [[ "$OS" = 'debian' && ! -e $RCLOCAL ]]; then
 					echo '#!/bin/sh -e
@@ -1680,7 +1701,7 @@ exit 0' >$RCLOCAL
 				proto $PROTOCOL
 				sndbuf 0
 				rcvbuf 0
-				remote 127.0.0.1 $porta
+				remote $IP $porta
 				resolv-retry 5
 				nobind
 				persist-key
@@ -1771,6 +1792,7 @@ exit 0' >$RCLOCAL
 					fun_conexao
 				}
 				verif_ptrs $porta
+				[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/tcp >/dev/null 2>&1
 				fun_inisocks() {
 					sleep 1
 					screen -dmS proxy python3 /etc/SSHPlus/proxy.py $porta
@@ -1837,6 +1859,7 @@ exit 0' >$RCLOCAL
 					fun_socks
 				}
 				verif_ptrs $porta
+				[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/tcp >/dev/null 2>&1
 				# Find next available ws number
 				ws_num=1
 				while screen -ls | grep -q "\.ws$ws_num\s"; do
@@ -1959,6 +1982,7 @@ exit 0' >$RCLOCAL
 					fun_conexao
 				}
 				verif_ptrs $porta
+				[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/tcp >/dev/null 2>&1
 				fun_inisocksop() {
 					[[ "$(netstat -tlpn | grep 'openvpn' | wc -l)" != '0' ]] && {
 						listoldop=$(grep -w 'DEFAULT_HOST =' /etc/SSHPlus/open.py | cut -d"'" -f2 | cut -d: -f2)
@@ -2001,6 +2025,7 @@ exit 0' >$RCLOCAL
 					fun_conexao
 				}
 				verif_ptrs $porta
+				[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/tcp >/dev/null 2>&1
 				echo ""
 				echo -e "\033[1;32mSTARTING PROXY SOCKS ON PORT \033[1;31m$porta\033[1;33m"
 				echo ""
@@ -2244,6 +2269,7 @@ exit 0' >$RCLOCAL
 				fun_conexao
 			}
 			verif_ptrs $pt
+			[[ -f "/usr/sbin/ufw" ]] && ufw allow ${pt}/tcp >/dev/null 2>&1
 			echo -e "\n\033[1;32mADDING PORT TO SSH\033[0m"
 			echo ""
 			fun_addpssh() {
@@ -2298,15 +2324,32 @@ exit 0' >$RCLOCAL
 			clear
 			echo -e "\E[44;1;37m             SSLH INSTALLER               \E[0m\n"
 			echo -e "\n\033[1;33m[\033[1;31m!\033[1;33m] \033[1;32mPORT \033[1;37m443 \033[1;32mWILL BE USED BY DEFAULT\033[0m\n"
+			# SSLH and stunnel both want to bind 0.0.0.0:443. If stunnel is
+			# already there, they will fight on every reboot and one of
+			# them will silently fail. Refuse the install instead of
+			# letting the user lock themselves out of SSL TUNNEL.
+			if [[ -e /etc/stunnel/stunnel.conf ]] && netstat -nltp 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
+				echo -e "\n\033[1;31m[\033[1;33m!\033[1;31m] \033[1;33mSSL TUNNEL is already bound to port 443.\033[0m"
+				echo -e "\033[1;33m    Remove SSL TUNNEL first or it will fight SSLH for the port.\033[0m"
+				sleep 4
+				fun_conexao
+				return
+			fi
 			echo -ne "\033[1;32mDO YOU REALLY WANT TO INSTALL SSLH \033[1;31m? \033[1;33m[y/n]:\033[1;37m "
 			read resp
 			[[ "$resp" = 'y' ]] && {
 				verif_ptrs 443
 				fun_instsslh() {
-					[[ -e "/etc/stunnel/stunnel.conf" ]] && ptssl="$(netstat -nplt | grep 'stunnel' | awk {'print $4'} | cut -d: -f2 | xargs)" || ptssl='3128'
-					[[ -e "/etc/openvpn/server.conf" ]] && ptvpn="$(netstat -nplt | grep 'openvpn' | awk {'print $4'} | cut -d: -f2 | xargs)" || ptvpn='1194'
+					# Pick a single backend port. `xargs` of multiple
+					# stunnel listeners would render `--ssl 127.0.0.1:A B`
+					# which sslh rejects as a syntax error.
+					[[ -e "/etc/stunnel/stunnel.conf" ]] && ptssl="$(netstat -nplt | grep 'stunnel' | awk '{print $4}' | cut -d: -f2 | head -n1)" || ptssl='3128'
+					[[ -e "/etc/openvpn/server.conf" ]] && ptvpn="$(netstat -nplt | grep 'openvpn' | awk '{print $4}' | cut -d: -f2 | head -n1)" || ptvpn='1194'
+					[[ -z "$ptssl" ]] && ptssl='3128'
+					[[ -z "$ptvpn" ]] && ptvpn='1194'
 					DEBIAN_FRONTEND=noninteractive apt-get -y install sslh
 					echo -e "#Modo autónomo\n\nRUN=yes\n\nDAEMON=/usr/sbin/sslh\n\nDAEMON_OPTS='--user sslh --listen 0.0.0.0:443 --ssh 127.0.0.1:22 --ssl 127.0.0.1:$ptssl --http 127.0.0.1:80 --openvpn 127.0.0.1:$ptvpn --pidfile /var/run/sslh/sslh.pid'" >/etc/default/sslh
+					[[ -f "/usr/sbin/ufw" ]] && ufw allow 443/tcp >/dev/null 2>&1
 					/etc/init.d/sslh start && service sslh start
 				}
 				echo -e "\n\033[1;32mINSTALLING SSLH !\033[0m\n"

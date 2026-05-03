@@ -72,6 +72,10 @@ if [[ "$resp" = "y" || "$resp" = "Y" ]];then
     rm -f /etc/IP > /dev/null 2>&1
     rm -f /root/.bash_history > /dev/null 2>&1
 
+    # Drop the immutable bit older versions of the installer set on
+    # /etc/resolv.conf, otherwise the user can never edit it again.
+    chattr -i /etc/resolv.conf > /dev/null 2>&1 || true
+
     # Clean profile and bashrc
     sed -i '/menu/d' /etc/profile > /dev/null 2>&1
     sed -i '/SSHPlus/d' /etc/profile > /dev/null 2>&1

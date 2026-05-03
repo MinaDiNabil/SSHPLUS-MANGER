@@ -19,7 +19,12 @@ chown nobody:$GROUPNAME /etc/openvpn/crl.pem
 } > /dev/null 2>&1
 echo -e "\E[44;1;37m Usuario          Data         Estado         Ação   \E[0m"
 echo ""
-for user in $(awk -F: '{print $1}' /etc/passwd); do
+# Limit the loop to real (non-system) accounts. UID >=1000 is the
+# Debian/Ubuntu/RHEL convention for human users; without this filter
+# the loop walks through `mail`, `proxy`, `bind`, etc. and any one of
+# them whose name is a substring of a running command line would have
+# its processes killed by the (now removed) `pkill -f`.
+for user in $(awk -F: '$3>=1000 {print $1}' /etc/passwd); do
 	expdate=$(chage -l $user|awk -F: '/Account expires/{print $2}')
 	echo $expdate|grep -q never && continue
 	datanormal=$(date -d"$expdate" '+%d/%m/%Y')
@@ -30,7 +35,10 @@ for user in $(awk -F: '{print $1}' /etc/passwd); do
 	echo $diff|grep -q ^\- && echo "VALIDO   NAO REMOVIDO" && continue
 	tput setaf 1 ; tput bold
 	echo "VENCEU   FOI REMOVIDO"
-	pkill -f $user
+	# Match by ownership (-u), not command line (-f). `pkill -f vpn`
+	# would also kill openvpn/openvpn-server because the username is a
+	# substring of the daemon name, taking out every connected client.
+	pkill -KILL -u "$user" 2>/dev/null
 	userdel --force $user
 	grep -v ^$user[[:space:]] /root/usuarios.db > /tmp/ph ; cat /tmp/ph > /root/usuarios.db
 	if [[ -e /etc/openvpn/server.conf ]]; then
