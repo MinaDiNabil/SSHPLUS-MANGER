@@ -448,8 +448,8 @@ else
 
 		# Start the local-only payload multiplexer (wsproxy) on 127.0.0.1:700 -> SSH:22
 		if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-			screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
-			echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22" >>/etc/autostart
+			screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1 >/dev/null 2>&1
+			echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1" >>/etc/autostart
 		fi
 
 		cat > /etc/stunnel/stunnel.conf <<-STUNNEL_EOF

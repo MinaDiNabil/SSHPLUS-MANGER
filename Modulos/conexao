@@ -424,9 +424,11 @@ SCOLOR='\033[0m'
 						sleep 2
 						return 1
 					fi
-					# Remove from extra args
+					# Remove from extra args. Anchor "-p $pt" so the substring
+					# match cannot eat half of "-p ${pt}X" (e.g. removing port
+					# 444 would otherwise corrupt "-p 4441 -p 444" into "1 ").
 					extra_args=$(grep 'DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-					new_args=$(echo "$extra_args" | sed "s|-p $pt||g" | sed 's/  */ /g' | sed 's/^ //g' | sed 's/ $//g')
+					new_args=$(echo "$extra_args" | sed -E "s/(^| )-p $pt( |\$)/\\1\\2/g" | sed -E 's/  +/ /g; s/^ +//; s/ +$//')
 					sed -i "s|DROPBEAR_EXTRA_ARGS=.*|DROPBEAR_EXTRA_ARGS=\"$new_args\"|g" /etc/default/dropbear
 					service dropbear restart
 					/etc/init.d/dropbear restart
@@ -752,16 +754,25 @@ SCOLOR='\033[0m'
 				echo -e "\n\033[1;32mADDING PORT TO SSL TUNNEL\033[0m"
 				echo ""
 				fun_addssl() {
-					# Count existing services
-					service_count=$(grep -c '^\[' /etc/stunnel/stunnel.conf)
-					service_name="stunnel$service_count"
+					# Use the accept port to derive a unique [section] name so
+					# add → remove → add cycles can never produce a duplicate
+					# section (a counter would: removing stunnel1 from a config
+					# that has stunnel/stunnel1/stunnel2 leaves count=2, and
+					# the next add would collide with the existing stunnel2 and
+					# stop stunnel4 from starting).
+					service_name="stunnel_${porta}"
 					# Spawn a payload multiplexer for this accept port so the SSL
 					# tunnel transparently accepts SSL/TLS (SNI), WS SSL and WS Proxy.
+					# Guard against porta+10000 > 65535 and against the chosen
+					# local backend port being already taken.
 					sslmux_port=$((porta + 10000))
-					if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${sslmux_port}\$"; then
-						screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl
-						echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${sslmux_port}\$' || screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl" >>/etc/autostart
-					fi
+					if (( sslmux_port > 65535 )); then sslmux_port=$((10000 + (porta % 5000))); fi
+					while ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${sslmux_port}\$"; do
+						sslmux_port=$((sslmux_port + 1))
+						(( sslmux_port > 65535 )) && sslmux_port=10000
+					done
+					screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl 127.0.0.1
+					echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${sslmux_port}\$' || screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl 127.0.0.1" >>/etc/autostart
 					# Add new service section pointing to the mux (not directly to SSH)
 					echo -e "\n[$service_name]\nconnect = 127.0.0.1:$sslmux_port\naccept = ${porta}" >> /etc/stunnel/stunnel.conf
 					service stunnel4 restart
@@ -983,11 +994,17 @@ SCOLOR='\033[0m'
 				# Spawn the local-only payload multiplexer that lets port ${porta}
 				# accept SSL/TLS (SNI), WS SSL and WS Proxy on the same listener.
 				command -v python3 >/dev/null 2>&1 || apt-get install python3 -y >/dev/null 2>&1
+				# Pick a free local backend port. porta+10000 may overflow above
+				# 65535 for high accept ports (e.g. 60000); fall back to a low
+				# unprivileged offset and bump until something is free.
 				sslmux_port=$((porta + 10000))
-				if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${sslmux_port}\$"; then
-					screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl
-					echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${sslmux_port}\$' || screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl" >>/etc/autostart
-				fi
+				if (( sslmux_port > 65535 )); then sslmux_port=$((10000 + (porta % 5000))); fi
+				while ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${sslmux_port}\$"; do
+					sslmux_port=$((sslmux_port + 1))
+					(( sslmux_port > 65535 )) && sslmux_port=10000
+				done
+				screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl 127.0.0.1
+				echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${sslmux_port}\$' || screen -dmS sslmux_${porta} python3 /etc/SSHPlus/wsproxy.py $sslmux_port $portssl 127.0.0.1" >>/etc/autostart
 				cat > /etc/stunnel/stunnel.conf <<-EOF
 cert = /etc/stunnel/cert.pem
 key = /etc/stunnel/key.pem
@@ -1605,9 +1622,13 @@ exit 0' >$RCLOCAL
 					firewall-cmd --permanent --zone=trusted --add-source=10.8.0.0/24
 				fi
 				if iptables -L -n | grep -qE 'REJECT|DROP'; then
+					# Insert at the head of each chain so the OpenVPN ACCEPTs
+					# short-circuit any REJECT/DROP placed later. Do NOT flush
+					# the filter table here — that used to wipe SSH/Dropbear/
+					# stunnel rules and silently kill every active tunnel the
+					# moment a user installed OpenVPN.
 					iptables -I INPUT -p $PROTOCOL --dport $porta -j ACCEPT
 					iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT
-					iptables -F
 					iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 					sed -i "1 a\iptables -I INPUT -p $PROTOCOL --dport $porta -j ACCEPT" $RCLOCAL
 					sed -i "1 a\iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT" $RCLOCAL

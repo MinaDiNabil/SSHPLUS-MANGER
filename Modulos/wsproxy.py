@@ -10,7 +10,6 @@ import hashlib
 import base64
 
 PASS = ''
-LISTENING_ADDR = '0.0.0.0'
 try:
     LISTENING_PORT = int(sys.argv[1])
 except (IndexError, ValueError):
@@ -19,6 +18,14 @@ try:
     SSH_PORT = int(sys.argv[2])
 except (IndexError, ValueError):
     SSH_PORT = 22
+# Optional third positional argument selects the bind address. Default
+# stays 0.0.0.0 for backward compatibility with public WebSocket
+# listeners; SSL-tunnel multiplexers should pass 127.0.0.1 so the
+# decrypted SSH backend is never reachable from outside.
+try:
+    LISTENING_ADDR = sys.argv[3]
+except IndexError:
+    LISTENING_ADDR = '0.0.0.0'
 BUFLEN = 4096 * 4
 TIMEOUT = 60
 MSG = ''
