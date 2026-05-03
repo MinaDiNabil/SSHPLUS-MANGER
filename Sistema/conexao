@@ -881,9 +881,47 @@ SCOLOR='\033[0m'
 			echo ""
 			ssl_certif() {
 				cd /etc/stunnel/
-				# Download certificates from repository
-				wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/cert -O cert.pem
-				wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/key -O key.pem
+				command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
+				cert_ip=$(curl -s -m 5 https://api.ipify.org 2>/dev/null || curl -s -m 5 https://ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
+				[[ -z "$cert_ip" ]] && cert_ip="127.0.0.1"
+				cert_host=$(hostname -f 2>/dev/null || hostname)
+				[[ -z "$cert_host" || "$cert_host" == "localhost" || "$cert_host" == "(none)" ]] && cert_host="sshplus.local"
+				cert_dom=""
+				[[ -s /etc/stunnel/.domain ]] && cert_dom=$(head -n1 /etc/stunnel/.domain | tr -d '[:space:]')
+				cert_cn="${cert_dom:-$cert_host}"
+				{
+					echo '[req]'
+					echo 'default_bits = 2048'
+					echo 'prompt = no'
+					echo 'default_md = sha256'
+					echo 'distinguished_name = dn'
+					echo 'x509_extensions = v3_ext'
+					echo ''
+					echo '[dn]'
+					echo "CN = $cert_cn"
+					echo ''
+					echo '[v3_ext]'
+					echo 'basicConstraints = CA:FALSE'
+					echo 'keyUsage = critical, digitalSignature, keyEncipherment'
+					echo 'extendedKeyUsage = serverAuth'
+					echo 'subjectAltName = @alt_names'
+					echo ''
+					echo '[alt_names]'
+					n=1; echo "DNS.$n = $cert_host"
+					if [[ -n "$cert_dom" && "$cert_dom" != "$cert_host" ]]; then
+						n=$((n+1)); echo "DNS.$n = $cert_dom"
+						n=$((n+1)); echo "DNS.$n = *.$cert_dom"
+					fi
+					n=$((n+1)); echo "DNS.$n = localhost"
+					echo "IP.1 = 127.0.0.1"
+					[[ "$cert_ip" != "127.0.0.1" ]] && echo "IP.2 = $cert_ip"
+				} > /etc/stunnel/openssl.cnf
+				openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+					-keyout /etc/stunnel/key.pem \
+					-out /etc/stunnel/cert.pem \
+					-config /etc/stunnel/openssl.cnf \
+					-extensions v3_ext >/dev/null 2>&1
+				rm -f /etc/stunnel/openssl.cnf
 				chmod 600 cert.pem key.pem
 				# Enable stunnel4 service
 				sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
