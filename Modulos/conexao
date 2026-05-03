@@ -703,7 +703,111 @@ SCOLOR='\033[0m'
 		fi
 	}
 	inst_ssl() {
+		# Define ssl_certif BEFORE the running/installed branch so the
+		# CHANGE SSL DOMAIN flow (which lives inside the running branch)
+		# can actually invoke it. Earlier this function only existed
+		# inside the install branch, so users entering CHANGE SSL DOMAIN
+		# saw "Certificate updated" but no regeneration ever happened —
+		# fun_bar runs the named command in a subshell that swallows the
+		# "command not found" error, leaving the old cert in place.
+		ssl_certif() {
+			cd /etc/stunnel/
+			command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
+			# Auto-detect public IP and FQDN; fall back to local identifiers
+			# so the SAN block always has at least one usable entry.
+			cert_ip=$(curl -s -m 5 https://api.ipify.org 2>/dev/null || curl -s -m 5 https://ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
+			[[ -z "$cert_ip" ]] && cert_ip="127.0.0.1"
+			cert_host=$(hostname -f 2>/dev/null || hostname)
+			[[ -z "$cert_host" || "$cert_host" == "localhost" || "$cert_host" == "(none)" ]] && cert_host="sshplus.local"
+			# Optional user-supplied domain (saved by the CHANGE SSL DOMAIN menu)
+			cert_dom=""
+			[[ -s /etc/stunnel/.domain ]] && cert_dom=$(head -n1 /etc/stunnel/.domain | tr -d '[:space:]')
+			cert_cn="${cert_dom:-$cert_host}"
+			{
+				echo '[req]'
+				echo 'default_bits = 2048'
+				echo 'prompt = no'
+				echo 'default_md = sha256'
+				echo 'distinguished_name = dn'
+				echo 'x509_extensions = v3_ext'
+				echo ''
+				echo '[dn]'
+				echo "CN = $cert_cn"
+				echo ''
+				echo '[v3_ext]'
+				echo 'basicConstraints = CA:FALSE'
+				echo 'keyUsage = critical, digitalSignature, keyEncipherment'
+				echo 'extendedKeyUsage = serverAuth'
+				echo 'subjectAltName = @alt_names'
+				echo ''
+				echo '[alt_names]'
+				n=1; echo "DNS.$n = $cert_host"
+				if [[ -n "$cert_dom" && "$cert_dom" != "$cert_host" ]]; then
+					n=$((n+1)); echo "DNS.$n = $cert_dom"
+					n=$((n+1)); echo "DNS.$n = *.$cert_dom"
+				fi
+				n=$((n+1)); echo "DNS.$n = localhost"
+				echo "IP.1 = 127.0.0.1"
+				[[ "$cert_ip" != "127.0.0.1" ]] && echo "IP.2 = $cert_ip"
+			} > /etc/stunnel/openssl.cnf
+			# Keep the previous cert/key around so a failed openssl run
+			# leaves the server with a working certificate.
+			[[ -s /etc/stunnel/cert.pem ]] && cp -a /etc/stunnel/cert.pem /etc/stunnel/cert.pem.bak
+			[[ -s /etc/stunnel/key.pem ]] && cp -a /etc/stunnel/key.pem /etc/stunnel/key.pem.bak
+			openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+				-keyout /etc/stunnel/key.pem \
+				-out /etc/stunnel/cert.pem \
+				-config /etc/stunnel/openssl.cnf \
+				-extensions v3_ext >/etc/stunnel/openssl.err 2>&1
+			if [[ ! -s /etc/stunnel/cert.pem ]] || ! openssl x509 -in /etc/stunnel/cert.pem -noout >/dev/null 2>&1; then
+				[[ -s /etc/stunnel/cert.pem.bak ]] && mv -f /etc/stunnel/cert.pem.bak /etc/stunnel/cert.pem
+				[[ -s /etc/stunnel/key.pem.bak ]] && mv -f /etc/stunnel/key.pem.bak /etc/stunnel/key.pem
+			fi
+			rm -f /etc/stunnel/openssl.cnf /etc/stunnel/openssl.err /etc/stunnel/cert.pem.bak /etc/stunnel/key.pem.bak
+			chmod 600 cert.pem key.pem 2>/dev/null
+			# Tolerate `ENABLED=0`, `ENABLED="0"`, `# ENABLED=0`, etc.
+			if grep -qE '^[# ]*ENABLED=' /etc/default/stunnel4 2>/dev/null; then
+				sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+			else
+				[[ -f /etc/default/stunnel4 ]] && echo 'ENABLED=1' >> /etc/default/stunnel4
+			fi
+			cd $HOME
+		}
 		if netstat -nltp | grep 'stunnel4' 1>/dev/null 2>/dev/null; then
+			# Auto-fix the cert before drawing the menu so users opening
+			# this screen always see (and use) a valid certificate. Old
+			# installs shipped a long-expired Let's Encrypt cert for
+			# `sslpingudomain.tk` that was never replaced by code updates;
+			# detect that (or any expired/parse-failed cert) and rebuild
+			# in place.
+			if [[ -e /etc/stunnel/stunnel.conf ]]; then
+				command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
+				_need_regen=0
+				if [[ ! -s /etc/stunnel/cert.pem ]] || ! openssl x509 -in /etc/stunnel/cert.pem -noout 2>/dev/null; then
+					_need_regen=1
+				elif openssl x509 -in /etc/stunnel/cert.pem -noout -subject -ext subjectAltName 2>/dev/null | grep -q "sslpingudomain"; then
+					_need_regen=1
+				elif ! openssl x509 -in /etc/stunnel/cert.pem -checkend $((30*24*3600)) >/dev/null 2>&1; then
+					_need_regen=1
+				elif [[ -s /etc/stunnel/.domain && /etc/stunnel/.domain -nt /etc/stunnel/cert.pem ]]; then
+					_need_regen=1
+				elif [[ -s /etc/stunnel/.domain ]]; then
+					_want=$(head -n1 /etc/stunnel/.domain | tr -d '[:space:]')
+					openssl x509 -in /etc/stunnel/cert.pem -noout -ext subjectAltName 2>/dev/null \
+						| grep -qF "DNS:$_want" || _need_regen=1
+				fi
+				if [[ $_need_regen -eq 1 ]]; then
+					echo -e "\033[1;33m  ⚙  Certificate is stale or doesn't cover the configured domain — regenerating...\033[0m"
+					ssl_certif >/dev/null 2>&1
+					service stunnel4 stop >/dev/null 2>&1
+					/etc/init.d/stunnel4 stop >/dev/null 2>&1
+					sleep 1
+					service stunnel4 start >/dev/null 2>&1
+					/etc/init.d/stunnel4 start >/dev/null 2>&1
+					echo -e "\033[1;32m  ✓ Certificate rebuilt and stunnel restarted.\033[0m"
+					sleep 2
+				fi
+			fi
 			[[ $(netstat -nltp | grep 'stunnel4' | wc -l) != '0' ]] && sslt=$(netstat -nplt | grep stunnel4 | awk {'print $4'} | awk -F ":" {'print $2'} | xargs) || sslt="\033[1;31mUNAVAILABLE"
 			echo -e "\E[44;1;37m              MANAGE SSL TUNNEL               \E[0m"
 			echo -e "\n\033[1;33mPORTS\033[1;37m: \033[1;32m$sslt"
@@ -1006,75 +1110,9 @@ SCOLOR='\033[0m'
 			fun_bar 'apt-get update -y' 'apt-get install stunnel4 -y'
 			echo -e "\n\033[1;32mCREATING CERTIFICATES !\033[0m"
 			echo ""
-			ssl_certif() {
-				cd /etc/stunnel/
-				command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
-				# Auto-detect public IP and FQDN; fall back to local identifiers
-				# so the SAN block always has at least one usable entry.
-				cert_ip=$(curl -s -m 5 https://api.ipify.org 2>/dev/null || curl -s -m 5 https://ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
-				[[ -z "$cert_ip" ]] && cert_ip="127.0.0.1"
-				cert_host=$(hostname -f 2>/dev/null || hostname)
-				[[ -z "$cert_host" || "$cert_host" == "localhost" || "$cert_host" == "(none)" ]] && cert_host="sshplus.local"
-				# Optional user-supplied domain (saved by the CHANGE SSL DOMAIN menu)
-				cert_dom=""
-				[[ -s /etc/stunnel/.domain ]] && cert_dom=$(head -n1 /etc/stunnel/.domain | tr -d '[:space:]')
-				cert_cn="${cert_dom:-$cert_host}"
-				{
-					echo '[req]'
-					echo 'default_bits = 2048'
-					echo 'prompt = no'
-					echo 'default_md = sha256'
-					echo 'distinguished_name = dn'
-					echo 'x509_extensions = v3_ext'
-					echo ''
-					echo '[dn]'
-					echo "CN = $cert_cn"
-					echo ''
-					echo '[v3_ext]'
-					echo 'basicConstraints = CA:FALSE'
-					echo 'keyUsage = critical, digitalSignature, keyEncipherment'
-					echo 'extendedKeyUsage = serverAuth'
-					echo 'subjectAltName = @alt_names'
-					echo ''
-					echo '[alt_names]'
-					n=1; echo "DNS.$n = $cert_host"
-					if [[ -n "$cert_dom" && "$cert_dom" != "$cert_host" ]]; then
-						n=$((n+1)); echo "DNS.$n = $cert_dom"
-						n=$((n+1)); echo "DNS.$n = *.$cert_dom"
-					fi
-					n=$((n+1)); echo "DNS.$n = localhost"
-					echo "IP.1 = 127.0.0.1"
-					[[ "$cert_ip" != "127.0.0.1" ]] && echo "IP.2 = $cert_ip"
-				} > /etc/stunnel/openssl.cnf
-				# Keep the previous cert/key around so a failed openssl run
-				# (no openssl, bad config, full disk) leaves the server with
-				# a working certificate instead of an empty file that stops
-				# stunnel from binding port 443 entirely.
-				[[ -s /etc/stunnel/cert.pem ]] && cp -a /etc/stunnel/cert.pem /etc/stunnel/cert.pem.bak
-				[[ -s /etc/stunnel/key.pem ]] && cp -a /etc/stunnel/key.pem /etc/stunnel/key.pem.bak
-				openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-					-keyout /etc/stunnel/key.pem \
-					-out /etc/stunnel/cert.pem \
-					-config /etc/stunnel/openssl.cnf \
-					-extensions v3_ext >/etc/stunnel/openssl.err 2>&1
-				if [[ ! -s /etc/stunnel/cert.pem ]] || ! openssl x509 -in /etc/stunnel/cert.pem -noout >/dev/null 2>&1; then
-					# Restore the previous cert/key if we had any.
-					[[ -s /etc/stunnel/cert.pem.bak ]] && mv -f /etc/stunnel/cert.pem.bak /etc/stunnel/cert.pem
-					[[ -s /etc/stunnel/key.pem.bak ]] && mv -f /etc/stunnel/key.pem.bak /etc/stunnel/key.pem
-					echo "ERROR: openssl could not generate a valid certificate." >&2
-					[[ -s /etc/stunnel/openssl.err ]] && head -n5 /etc/stunnel/openssl.err >&2
-				fi
-				rm -f /etc/stunnel/openssl.cnf /etc/stunnel/openssl.err /etc/stunnel/cert.pem.bak /etc/stunnel/key.pem.bak
-				chmod 600 cert.pem key.pem 2>/dev/null
-				# Enable stunnel4 service
-				# Tolerate `ENABLED=0`, `ENABLED="0"`, `# ENABLED=0`, etc.
-				if grep -qE '^[# ]*ENABLED=' /etc/default/stunnel4 2>/dev/null; then
-					sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
-				else
-					echo 'ENABLED=1' >> /etc/default/stunnel4
-				fi
-				cd $HOME
-			}
+			# ssl_certif is now defined at the top of inst_ssl() so both
+			# the install branch (here) and the management branch (CHANGE
+			# SSL DOMAIN above) can share a single implementation.
 			fun_bar 'ssl_certif'
 			echo -e "\n\033[1;32mCONFIGURING SSL TUNNEL !\033[0m"
 			echo ""
