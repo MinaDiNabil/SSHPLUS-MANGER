@@ -497,6 +497,14 @@ else
 		sleep 1
 		if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
 			echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (SSL/TLS, WS SSL, WS Proxy)\033[0m"
+			# This installer is non-interactive, so the cert only covers
+			# the auto-detected hostname and IP. If clients connect via a
+			# domain that points to this server, strict TLS clients reject
+			# the handshake because the SNI doesn't match the cert. Tell
+			# the user explicitly how to fix it.
+			echo -e "\033[1;33m     ⚠  SSL/TLS (SNI) clients connecting via a custom domain need\033[0m"
+			echo -e "\033[1;33m        that domain in the certificate. Run \033[1;36mconexao\033[1;33m → SSL TUNNEL\033[0m"
+			echo -e "\033[1;33m        → \033[1;31m[\033[1;36m4\033[1;31m] CHANGE SSL DOMAIN\033[1;33m to add it.\033[0m"
 		else
 			echo -e "\033[1;31m   ✗ stunnel4 did not bind port 443. Check 'journalctl -u stunnel4'.\033[0m"
 		fi
