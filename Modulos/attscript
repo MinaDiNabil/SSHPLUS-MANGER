@@ -111,7 +111,7 @@ fun_force_update () {
 
   # Helper files that live in /etc/SSHPlus/ (not run from /bin/).
   mkdir -p /etc/SSHPlus 2>/dev/null
-  local _plus=(cabecalho bot open.py proxy.py wsproxy.py)
+  local _plus=(cabecalho bot open.py proxy.py wsproxy.py sniproxy.py)
   for _arq in "${_plus[@]}"; do
     if [[ -f "$src/Modulos/$_arq" ]]; then
       cp -f "$src/Modulos/$_arq" "/etc/SSHPlus/$_arq"
@@ -128,136 +128,110 @@ fun_force_update () {
   cd "$HOME"
   rm -rf "$tmpdir"
 
-  # Old installs shipped a static, expired Let's Encrypt certificate
-  # for `sslpingudomain.tk`. Pulling new code never replaced it, so
-  # SSL/TLS (SNI) clients dialing the user's own domain still saw the
-  # wrong CN/SAN and rejected the handshake. fun_verify_cert detects
-  # that situation (or any cert that is expired, missing, fails to
-  # parse, or doesn't include /etc/stunnel/.domain) and rebuilds the
-  # cert in place using the dynamic generator below.
-  fun_verify_cert
+  # Bootstrap the dynamic-SNI CA and migrate any legacy stunnel install
+  # to sniproxy. Old installs were shipping a static self-signed cert
+  # whose SAN had to match the user's domain *and* every bug-host SNI
+  # the injector might send — an endless game of whack-a-mole that's
+  # exactly what the dynamic listener gets rid of.
+  fun_migrate_to_sniproxy
 
-  # Restart the payload multiplexers so the refreshed wsproxy.py takes
-  # effect right away. /etc/autostart re-spawns them on the next minute
-  # via cron, but doing it here avoids a downtime window.
-  for s in $(screen -ls 2>/dev/null | grep '\.sslmux_' | awk '{print $1}'); do
+  # Stop legacy multiplexers (refreshed wsproxy.py takes effect on
+  # respawn) and any leftover stunnel service. /etc/autostart will
+  # re-spawn the sniproxy + sslmux pairs we just registered on the
+  # next cron tick, but invoking it manually closes the gap.
+  for s in $(screen -ls 2>/dev/null | grep -E '\.(sslmux_|sniproxy_)' | awk '{print $1}'); do
     screen -S "$s" -X quit 2>/dev/null
   done
-  [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1
-  # stop+sleep+start beats `restart` here: on Debian builds where the
-  # unit is in failed state `restart` is a no-op and the new cert is
-  # never loaded. fun_verify_cert may have already done this, so the
-  # second pass is cheap when the unit is already up.
   service stunnel4 stop > /dev/null 2>&1
-  /etc/init.d/stunnel4 stop > /dev/null 2>&1
-  sleep 1
-  service stunnel4 start > /dev/null 2>&1
-  /etc/init.d/stunnel4 start > /dev/null 2>&1
+  systemctl disable stunnel4 > /dev/null 2>&1
+  [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1
 
   touch /tmp/.sshplus_force_ok
   return 0
 }
 
-# Regenerate /etc/stunnel/cert.pem and key.pem using the same logic the
-# SSL TUNNEL menu uses. Reads /etc/stunnel/.domain for an optional
-# user-supplied domain. Backs up the previous cert/key so a failed
-# openssl invocation cannot leave the server with an empty cert.
-fun_regen_cert () {
-  [[ ! -d /etc/stunnel ]] && return 0
+# Migrate a legacy static-cert stunnel install to the dynamic-SNI
+# sniproxy listener, in place. Idempotent: safe to call when sniproxy
+# is already the listener — it just re-bootstraps the CA.
+#
+# This finally retires the cycle of "regenerate the cert, restart
+# stunnel, hope the SAN happens to cover whatever hostname the client
+# typed". With sniproxy the cert is generated per ClientHello to match
+# whatever SNI showed up, so the user's own domain *and* every
+# bug-host SNI used to bypass carrier billing all just work.
+fun_migrate_to_sniproxy () {
+  [[ ! -d /etc/stunnel ]] && mkdir -p /etc/stunnel 2>/dev/null
+  command -v python3 >/dev/null 2>&1 || apt-get install python3 -y >/dev/null 2>&1
   command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
+  [[ -f /etc/SSHPlus/sniproxy.py ]] || return 0
 
-  local cert_ip cert_host cert_dom cert_cn n
-  cert_ip=$(curl -s -m 5 https://api.ipify.org 2>/dev/null \
-    || curl -s -m 5 https://ifconfig.me 2>/dev/null \
-    || hostname -I 2>/dev/null | awk '{print $1}')
-  [[ -z "$cert_ip" ]] && cert_ip="127.0.0.1"
-  cert_host=$(hostname -f 2>/dev/null || hostname)
-  [[ -z "$cert_host" || "$cert_host" == "localhost" || "$cert_host" == "(none)" ]] && cert_host="sshplus.local"
-  cert_dom=""
-  [[ -s /etc/stunnel/.domain ]] && cert_dom=$(head -n1 /etc/stunnel/.domain | tr -d '[:space:]')
-  cert_cn="${cert_dom:-$cert_host}"
+  python3 - <<'PY' >/dev/null 2>&1
+import sys
+sys.path.insert(0, '/etc/SSHPlus')
+import sniproxy
+sniproxy.ensure_ca()
+sniproxy.ensure_default_leaf()
+PY
 
-  [[ -s /etc/stunnel/cert.pem ]] && cp -a /etc/stunnel/cert.pem /etc/stunnel/cert.pem.bak
-  [[ -s /etc/stunnel/key.pem  ]] && cp -a /etc/stunnel/key.pem  /etc/stunnel/key.pem.bak
-
-  {
-    echo '[req]'
-    echo 'default_bits = 2048'
-    echo 'prompt = no'
-    echo 'default_md = sha256'
-    echo 'distinguished_name = dn'
-    echo 'x509_extensions = v3_ext'
-    echo ''
-    echo '[dn]'
-    echo "CN = $cert_cn"
-    echo ''
-    echo '[v3_ext]'
-    echo 'basicConstraints = CA:FALSE'
-    echo 'keyUsage = critical, digitalSignature, keyEncipherment'
-    echo 'extendedKeyUsage = serverAuth'
-    echo 'subjectAltName = @alt_names'
-    echo ''
-    echo '[alt_names]'
-    n=1; echo "DNS.$n = $cert_host"
-    if [[ -n "$cert_dom" && "$cert_dom" != "$cert_host" ]]; then
-      n=$((n+1)); echo "DNS.$n = $cert_dom"
-      n=$((n+1)); echo "DNS.$n = *.$cert_dom"
-    fi
-    n=$((n+1)); echo "DNS.$n = localhost"
-    echo "IP.1 = 127.0.0.1"
-    [[ "$cert_ip" != "127.0.0.1" ]] && echo "IP.2 = $cert_ip"
-  } > /etc/stunnel/openssl.cnf
-
-  openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-    -keyout /etc/stunnel/key.pem \
-    -out /etc/stunnel/cert.pem \
-    -config /etc/stunnel/openssl.cnf \
-    -extensions v3_ext >/dev/null 2>&1
-
-  if [[ ! -s /etc/stunnel/cert.pem ]] || ! openssl x509 -in /etc/stunnel/cert.pem -noout >/dev/null 2>&1; then
-    [[ -s /etc/stunnel/cert.pem.bak ]] && mv -f /etc/stunnel/cert.pem.bak /etc/stunnel/cert.pem
-    [[ -s /etc/stunnel/key.pem.bak  ]] && mv -f /etc/stunnel/key.pem.bak  /etc/stunnel/key.pem
-  fi
-  rm -f /etc/stunnel/openssl.cnf /etc/stunnel/cert.pem.bak /etc/stunnel/key.pem.bak
-  chmod 600 /etc/stunnel/cert.pem /etc/stunnel/key.pem 2>/dev/null
-
-  if grep -qE '^[# ]*ENABLED=' /etc/default/stunnel4 2>/dev/null; then
-    sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
-  else
-    [[ -f /etc/default/stunnel4 ]] && echo 'ENABLED=1' >> /etc/default/stunnel4
-  fi
-}
-
-# Decide whether we need to regenerate the cert right now. Conditions:
-#   - cert is missing or unreadable
-#   - cert is the legacy `sslpingudomain.tk` Let's Encrypt cert that
-#     pre-dates the dynamic generator (subject or SAN contains it)
-#   - cert is expired or expires within 30 days
-#   - the user changed /etc/stunnel/.domain after the cert was issued
-#   - /etc/stunnel/.domain has a hostname that is not in the SAN block
-fun_verify_cert () {
-  [[ -e /etc/stunnel/stunnel.conf ]] || return 0
-  command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
-  command -v openssl >/dev/null 2>&1 || return 0
-
-  local need=0
-  if [[ ! -s /etc/stunnel/cert.pem ]] || ! openssl x509 -in /etc/stunnel/cert.pem -noout 2>/dev/null; then
-    need=1
-  elif openssl x509 -in /etc/stunnel/cert.pem -noout -subject -ext subjectAltName 2>/dev/null | grep -q "sslpingudomain"; then
-    need=1
-  elif ! openssl x509 -in /etc/stunnel/cert.pem -checkend $((30*24*3600)) >/dev/null 2>&1; then
-    need=1
-  elif [[ -s /etc/stunnel/.domain && /etc/stunnel/.domain -nt /etc/stunnel/cert.pem ]]; then
-    need=1
-  elif [[ -s /etc/stunnel/.domain ]]; then
-    local want san
-    want=$(head -n1 /etc/stunnel/.domain | tr -d '[:space:]')
-    san=$(openssl x509 -in /etc/stunnel/cert.pem -noout -ext subjectAltName 2>/dev/null)
-    echo "$san" | grep -qF "DNS:$want" || need=1
+  # Re-spawn sniproxy + sslmux pairs for every accept port we know
+  # about. Sources:
+  #   1. Legacy stunnel.conf [section] blocks (one per accept port).
+  #   2. Existing sniproxy_PORT screen sessions (already migrated).
+  # We rebuild from (1) because the matching wsproxy mux ports there
+  # are guaranteed to be paired with a backend SSH/Dropbear port. For
+  # (2) we leave the screen alone — the entry is already in autostart.
+  if [[ -f /etc/stunnel/stunnel.conf ]]; then
+    local _accept _connect _mux _backend _wsline
+    while read -r _accept _connect; do
+      [[ -z "$_accept" || -z "$_connect" ]] && continue
+      _mux=${_connect##*:}
+      # Look up which backend the existing wsproxy multiplexer was
+      # forwarding to by reading its full command line. Falls back to
+      # SSH:22 if the multiplexer process is gone.
+      _wsline=$(ps -eo args 2>/dev/null \
+        | awk -v m="$_mux" '/wsproxy\.py/ && $0 ~ ("wsproxy\\.py[[:space:]]+"m"[[:space:]]") {print; exit}')
+      _backend=$(echo "$_wsline" | awk '{
+        for (i=1;i<=NF;i++) if ($i ~ /wsproxy\.py$/) { print $(i+2); exit }
+      }')
+      [[ -z "$_backend" ]] && _backend=22
+      # Stop any wsproxy currently bound to $_mux so the fresh one we
+      # launch below can take over the port. Old installs named the
+      # initial 443 multiplexer just `sslmux` (no port suffix) while
+      # later additions use `sslmux_<port>`; kill both shapes plus any
+      # bare process whose command line points at this mux port.
+      for s in $(screen -ls 2>/dev/null | awk -v p="$_mux" '
+        /\.sslmux/{
+          name=$1; sub(/^[0-9]+\./, "", name); print name
+        }'); do
+        screen -S "$s" -X quit 2>/dev/null
+      done
+      screen -S sniproxy_${_accept} -X quit 2>/dev/null
+      pkill -f "wsproxy\\.py[[:space:]]+${_mux}[[:space:]]" 2>/dev/null
+      sleep 1
+      screen -dmS sslmux_${_accept} python3 /etc/SSHPlus/wsproxy.py $_mux $_backend 127.0.0.1
+      screen -dmS sniproxy_${_accept} python3 /etc/SSHPlus/sniproxy.py $_accept $_mux
+      # Replace matching autostart lines so the new entries are canonical
+      # (otherwise duplicates accumulate across update runs and a
+      # legacy `sslmux` line would respawn the stale multiplexer every
+      # minute).
+      sed -i "/sslmux python3 \\/etc\\/SSHPlus\\/wsproxy\\.py ${_mux} /d" /etc/autostart 2>/dev/null
+      sed -i "/sslmux_${_accept} python3/d" /etc/autostart 2>/dev/null
+      sed -i "/sniproxy.py ${_accept} /d" /etc/autostart 2>/dev/null
+      echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${_mux}\$' || screen -dmS sslmux_${_accept} python3 /etc/SSHPlus/wsproxy.py $_mux $_backend 127.0.0.1" >>/etc/autostart
+      echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${_accept}\$' || screen -dmS sniproxy_${_accept} python3 /etc/SSHPlus/sniproxy.py $_accept $_mux" >>/etc/autostart
+    done < <(awk '
+      /^\[/ { acc=""; conn="" }
+      $1=="accept"  && $2=="=" { acc=$3 }
+      $1=="connect" && $2=="=" { conn=$3 }
+      acc != "" && conn != "" { print acc, conn; acc=""; conn="" }
+    ' /etc/stunnel/stunnel.conf)
   fi
 
-  if [[ $need -eq 1 ]]; then
-    fun_regen_cert
+  # Take stunnel down for good — sniproxy now owns those ports.
+  service stunnel4 stop >/dev/null 2>&1
+  systemctl disable stunnel4 >/dev/null 2>&1
+  if [[ -f /etc/default/stunnel4 ]]; then
+    sed -i 's/^[# ]*ENABLED=.*/ENABLED=0/' /etc/default/stunnel4
   fi
 }
 
@@ -302,33 +276,6 @@ vrs2=$(sed -n '1 p' /tmp/att | sed -e 's/[^0-9]//ig')
 
   if [[ "$force" = y || "$force" = Y ]]; then
 
-    # If SSL TUNNEL is set up but the user never told us their public
-    # domain, the auto-generated cert covers only the server hostname
-    # and IP. Strict TLS clients dialing the user's own domain then
-    # reject the handshake. Take the chance to ask once, here, while
-    # we know the user is interactive and updating anyway.
-    if [[ -e /etc/stunnel/stunnel.conf && ! -s /etc/stunnel/.domain ]]; then
-      echo ""
-      echo -e " \033[1;33mSSL TUNNEL is installed but no domain is configured.\033[0m"
-      echo -e " \033[1;33mIf clients connect via a domain (e.g. \033[1;36mssh-servers.example.com\033[1;33m)"
-      echo -e " \033[1;33mthe SSL certificate must include it, otherwise SSL/TLS (SNI)"
-      echo -e " \033[1;33mclients dialing the domain are rejected at handshake time.\033[0m"
-      echo ""
-      echo -ne " \033[1;32mEnter your domain (empty = skip)\033[1;33m:\033[1;37m "
-      read sslplus_dom
-      sslplus_dom=$(echo "$sslplus_dom" | tr -d '[:space:]' | tr 'A-Z' 'a-z')
-      if [[ -n "$sslplus_dom" ]]; then
-        if [[ "$sslplus_dom" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] && [[ "$sslplus_dom" == *.* ]]; then
-          mkdir -p /etc/stunnel
-          echo "$sslplus_dom" > /etc/stunnel/.domain
-          echo -e " \033[1;32m✓ Domain saved; the certificate will be regenerated below.\033[0m"
-        else
-          echo -e " \033[1;31m✗ '$sslplus_dom' is not a valid domain — skipping.\033[0m"
-        fi
-      fi
-      echo ""
-    fi
-
     echo -e "\n \033[1;32mFETCHING LATEST FIXES FROM MAIN BRANCH...\033[0m\n"
 
     fun_bar 'fun_force_update'
@@ -336,19 +283,26 @@ vrs2=$(sed -n '1 p' /tmp/att | sed -e 's/[^0-9]//ig')
     if [[ -f /tmp/.sshplus_force_ok ]]; then
       rm /tmp/.sshplus_force_ok > /dev/null 2>&1
       echo -e "\n \033[1;32mLATEST FIXES APPLIED SUCCESSFULLY!\033[0m"
-      # Show the SAN block of the live cert so the user can confirm
-      # at a glance whether their domain is covered by the SSL/TLS
-      # (SNI) handshake.
-      if [[ -s /etc/stunnel/cert.pem ]]; then
+      # Surface the SSL TUNNEL state so the user can see at a glance
+      # that they're now on the dynamic-SNI listener: every TLS
+      # handshake gets a leaf cert generated to match its SNI, which
+      # is what closes the long-running "works on the IP, fails on
+      # the domain (or on the bug-host)" report once and for all.
+      if screen -ls 2>/dev/null | grep -q '\.sniproxy_'; then
+        local _ports
+        _ports=$(screen -ls 2>/dev/null | awk '
+          /\.sniproxy_/{
+            split($1, a, "."); split(a[2], b, "_"); print b[2]
+          }' | sort -nu | xargs)
         echo ""
-        echo -e " \033[1;33mSSL TUNNEL certificate now covers:\033[0m"
-        openssl x509 -in /etc/stunnel/cert.pem -noout -ext subjectAltName 2>/dev/null \
-          | awk '/X509v3 Subject Alternative Name:/{getline; print}' \
-          | sed 's/, /\n/g; s/^[[:space:]]*//' \
-          | awk '{print "   \033[1;36m• \033[1;37m" $0}'
-        if [[ ! -s /etc/stunnel/.domain ]]; then
-          echo ""
-          echo -e " \033[1;33m To add a domain later: \033[1;36mconexao\033[1;33m → SSL TUNNEL → \033[1;31m[\033[1;36m4\033[1;31m]\033[1;33m CHANGE SSL DOMAIN\033[0m"
+        echo -e " \033[1;33mSSL TUNNEL: \033[1;36mDynamic SNI\033[1;33m on port(s): \033[1;32m$_ports\033[0m"
+        echo -e " \033[1;37m The TLS cert is generated per-connection to match"
+        echo -e " \033[1;37m whatever SNI the client sends — your own domain,"
+        echo -e " \033[1;37m every bug-host SNI, anything. No per-host config."
+        if [[ -s /etc/stunnel/sniproxy_ca.crt ]]; then
+          local _cached
+          _cached=$(ls -1 /etc/stunnel/sni_cache/*.crt 2>/dev/null | wc -l)
+          echo -e " \033[1;33m Cached SNI leaf certs: \033[1;32m$_cached\033[0m"
         fi
       fi
     else
