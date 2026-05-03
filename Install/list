@@ -35,14 +35,14 @@ grep -v "^PasswordAuthentication" /etc/ssh/sshd_config >/tmp/passlogin && mv /tm
 echo "PasswordAuthentication yes" >>/etc/ssh/sshd_config
 _dir1='/bin'
 _dir2='/etc/SSHPlus'
-rm $_dir2/ShellBot.sh $_dir2/cabecalho $_dir2/open.py $_dir2/proxy.py $_dir2/wsproxy.py >/dev/null 2>&1
-_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "badvpn" "userbackup" "instsqd" "blockt" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh")
+rm $_dir2/ShellBot.sh $_dir2/cabecalho $_dir2/open.py $_dir2/proxy.py $_dir2/wsproxy.py $_dir2/sniproxy.py >/dev/null 2>&1
+_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "badvpn" "userbackup" "instsqd" "blockt" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "sniproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh")
 for _arq in ${_mdls[@]}; do
 	[[ -e $_dir1/$_arq ]] && rm $_dir1/$_arq >/dev/null 2>&1
 	wget -c -P $_dir1 https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/$_arq
 	chmod +x $_dir1/$_arq
 done
-mv $_dir1/cabecalho $_dir1/bot $_dir1/open.py $_dir1/proxy.py $_dir1/wsproxy.py $_dir2
+mv $_dir1/cabecalho $_dir1/bot $_dir1/open.py $_dir1/proxy.py $_dir1/wsproxy.py $_dir1/sniproxy.py $_dir2
 _arq_host="/etc/hosts"
 _host[0]="d1n212ccp6ldpw.cloudfront.net"
 _host[1]="dns.whatsapp.net"
@@ -404,109 +404,81 @@ service dropbear start >/dev/null 2>&1
 [[ $(grep -c "/bin/false" /etc/shells) = '0' ]] && echo "/bin/false" >>/etc/shells
 echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143\033[0m"
 
-# 4. Install SSL TUNNEL on port 443. Inside the TLS layer we run a payload
-# multiplexer (wsproxy) bound to 127.0.0.1:700 so port 443 transparently
-# accepts ALL three connection methods:
+# 4. Install SSL TUNNEL on port 443. The listener is sniproxy.py — a
+# Python TLS terminator that issues a fresh self-signed leaf cert for
+# whatever SNI hostname the client sends, signed by a long-lived local
+# CA in /etc/stunnel/. Inside the TLS layer it forwards plaintext to a
+# payload multiplexer (wsproxy) bound to 127.0.0.1:700 so port 443
+# transparently accepts ALL three connection methods:
 #   - SSL/TLS (SNI)                  -> raw SSH inside TLS
 #   - Payload + SSL/TLS = WS SSL     -> WebSocket-style payload inside TLS
 #   - Payload + SSL/TLS + Proxy      -> HTTP CONNECT proxy inside TLS
-echo -e "\033[1;33m[4/8] Installing SSL TUNNEL (port 443, multi-method)...\033[0m"
+#
+# Why sniproxy instead of stunnel: stunnel serves one fixed cert, so
+# every new bug-host SNI (paysecure.islamicbank.ps,
+# *.gateway.mastercard.com, hcaptcha endpoints, ...) has to be added
+# to the cert SAN by hand or strict TLS clients/carrier middleboxes
+# reject the handshake. sniproxy reads the SNI from the ClientHello,
+# generates a leaf cert that matches it on the fly, and caches it on
+# disk for re-use — connecting via any domain "just works", including
+# the user's own domain, with zero per-host configuration.
+echo -e "\033[1;33m[4/8] Installing SSL TUNNEL (port 443, dynamic SNI)...\033[0m"
 
-# Pre-flight: ensure port 443 is free before installing stunnel
+# Pre-flight: ensure port 443 is free before installing the listener
 if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
 	holder=$(ss -tlnpH 2>/dev/null | awk '$4 ~ /(^|:)443$/ {print $NF; exit}')
 	echo -e "\033[1;31m   ✗ Port 443 already in use${holder:+ by $holder}. Skipping SSL TUNNEL install.\033[0m"
 	echo -e "\033[1;33m     Free port 443 (e.g. stop apache2/nginx) and re-run this step.\033[0m"
 else
-	apt-get install stunnel4 -y >/dev/null 2>&1
 	command -v python3 >/dev/null 2>&1 || apt-get install python3 -y >/dev/null 2>&1
 	command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
+	mkdir -p /etc/stunnel
 	cd /etc/stunnel/
 
-	# Generate a self-signed certificate that covers both the server's IP
-	# (as IP SAN) and its FQDN, so SSL/TLS (SNI) clients connecting via
-	# either the IP or the domain see a matching certificate.
-	cert_ip=$(curl -s -m 5 https://api.ipify.org 2>/dev/null || curl -s -m 5 https://ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
-	[[ -z "$cert_ip" ]] && cert_ip="127.0.0.1"
-	cert_host=$(hostname -f 2>/dev/null || hostname)
-	[[ -z "$cert_host" || "$cert_host" == "localhost" || "$cert_host" == "(none)" ]] && cert_host="sshplus.local"
-	{
-		echo '[req]'
-		echo 'default_bits = 2048'
-		echo 'prompt = no'
-		echo 'default_md = sha256'
-		echo 'distinguished_name = dn'
-		echo 'x509_extensions = v3_ext'
-		echo ''
-		echo '[dn]'
-		echo "CN = $cert_host"
-		echo ''
-		echo '[v3_ext]'
-		echo 'basicConstraints = CA:FALSE'
-		echo 'keyUsage = critical, digitalSignature, keyEncipherment'
-		echo 'extendedKeyUsage = serverAuth'
-		echo 'subjectAltName = @alt_names'
-		echo ''
-		echo '[alt_names]'
-		echo "DNS.1 = $cert_host"
-		echo "DNS.2 = localhost"
-		echo "IP.1 = 127.0.0.1"
-		[[ "$cert_ip" != "127.0.0.1" ]] && echo "IP.2 = $cert_ip"
-	} > /etc/stunnel/openssl.cnf
-	openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-		-keyout /etc/stunnel/key.pem \
-		-out /etc/stunnel/cert.pem \
-		-config /etc/stunnel/openssl.cnf \
-		-extensions v3_ext >/dev/null 2>&1
-	rm -f /etc/stunnel/openssl.cnf
+	# Disable any pre-existing stunnel4 service so it can never race
+	# sniproxy for port 443. Leaving the package installed is fine —
+	# sniproxy doesn't use it.
+	service stunnel4 stop >/dev/null 2>&1
+	systemctl disable stunnel4 >/dev/null 2>&1
+	if [[ -f /etc/default/stunnel4 ]]; then
+		sed -i 's/^[# ]*ENABLED=.*/ENABLED=0/' /etc/default/stunnel4
+	fi
 
-	if [[ ! -s /etc/stunnel/cert.pem ]] || [[ ! -s /etc/stunnel/key.pem ]]; then
-		echo -e "\033[1;31m   ✗ Failed to generate stunnel cert/key. SSL TUNNEL not started.\033[0m"
-		rm -f /etc/stunnel/cert.pem /etc/stunnel/key.pem
+	# sniproxy.py creates the CA, the default leaf cert and the cache
+	# directory the first time it runs. Bootstrap them up front so the
+	# first incoming connection doesn't pay the openssl-fork cost
+	# in-band.
+	python3 - <<-'PY' >/dev/null 2>&1
+	import sys
+	sys.path.insert(0, '/etc/SSHPlus')
+	import sniproxy
+	sniproxy.ensure_ca()
+	sniproxy.ensure_default_leaf()
+	PY
+
+	if [[ ! -s /etc/stunnel/sniproxy_ca.crt ]] || [[ ! -s /etc/stunnel/sniproxy_default.crt ]]; then
+		echo -e "\033[1;31m   ✗ Failed to bootstrap dynamic SNI CA. SSL TUNNEL not started.\033[0m"
 		cd $HOME
 	else
-		chmod 600 cert.pem key.pem
-		if grep -qE '^[# ]*ENABLED=' /etc/default/stunnel4 2>/dev/null; then
-			sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
-		else
-			echo 'ENABLED=1' >> /etc/default/stunnel4
-		fi
-
 		# Start the local-only payload multiplexer (wsproxy) on 127.0.0.1:700 -> SSH:22
 		if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
 			screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1 >/dev/null 2>&1
 			echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1" >>/etc/autostart
 		fi
 
-		cat > /etc/stunnel/stunnel.conf <<-STUNNEL_EOF
-		cert = /etc/stunnel/cert.pem
-		key = /etc/stunnel/key.pem
-		client = no
-		socket = a:SO_REUSEADDR=1
-		socket = l:TCP_NODELAY=1
-		socket = r:TCP_NODELAY=1
-
-		[stunnel]
-		connect = 127.0.0.1:700
-		accept = 443
-		STUNNEL_EOF
-		chmod 644 /etc/stunnel/stunnel.conf
-		service stunnel4 restart >/dev/null 2>&1
+		# Start the dynamic-SNI TLS listener on 0.0.0.0:443 -> 127.0.0.1:700
+		screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700 >/dev/null 2>&1
+		echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)443\$' || screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700" >>/etc/autostart
 		cd $HOME
 
 		sleep 1
 		if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
-			echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (SSL/TLS, WS SSL, WS Proxy)\033[0m"
-			# This installer is non-interactive, so the cert only covers
-			# the auto-detected hostname and IP. If clients connect via a
-			# domain that points to this server, strict TLS clients reject
-			# the handshake because the SNI doesn't match the cert. Tell
-			# the user explicitly how to fix it.
-			echo -e "\033[1;33m     ⚠  SSL/TLS (SNI) clients connecting via a custom domain need\033[0m"
-			echo -e "\033[1;33m        that domain in the certificate. Run \033[1;36mconexao\033[1;33m → SSL TUNNEL\033[0m"
-			echo -e "\033[1;33m        → \033[1;31m[\033[1;36m4\033[1;31m] CHANGE SSL DOMAIN\033[1;33m to add it.\033[0m"
+			echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (dynamic SNI)\033[0m"
+			echo -e "\033[1;36m     The TLS cert is generated on the fly to match whatever\033[0m"
+			echo -e "\033[1;36m     SNI the client sends, including any bug-host SNI used\033[0m"
+			echo -e "\033[1;36m     to bypass carrier billing — no per-host configuration.\033[0m"
 		else
-			echo -e "\033[1;31m   ✗ stunnel4 did not bind port 443. Check 'journalctl -u stunnel4'.\033[0m"
+			echo -e "\033[1;31m   ✗ sniproxy did not bind port 443. Check 'screen -r sniproxy_443'.\033[0m"
 		fi
 	fi
 fi

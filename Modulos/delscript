@@ -27,7 +27,12 @@ if [[ "$resp" = "y" || "$resp" = "Y" ]];then
     service squid3 stop > /dev/null 2>&1
     service openvpn stop > /dev/null 2>&1
     service stunnel4 stop > /dev/null 2>&1
-    killall -9 python > /dev/null 2>&1
+    # Stop dynamic-SNI listeners and their multiplexers; without this
+    # the python3 processes keep ports 443/etc bound until reboot.
+    for s in $(screen -ls 2>/dev/null | grep -E '\.(sniproxy_|sslmux_|ws[0-9]+|proxy)' | awk '{print $1}'); do
+        screen -S "$s" -X quit > /dev/null 2>&1
+    done
+    killall -9 python python3 > /dev/null 2>&1
     screen -wipe > /dev/null 2>&1
 
     # Remove packages

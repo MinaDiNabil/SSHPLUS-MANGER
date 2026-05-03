@@ -740,7 +740,13 @@ infovps() {
     usoram=$(free -m | awk 'NR==2{printf "%.2f%%\t\t", $3*100/$2 }')
     total=$(cat -n /root/usuarios.db | tail -n 1 | awk '{print $1}')
     echo -e "SSH: $(grep 'Port' /etc/ssh/sshd_config | cut -d' ' -f2 | grep -v 'no' | xargs)" >$PTs
-    [[ -e "/etc/stunnel/stunnel.conf" ]] && echo -e "SSL Tunel: $(netstat -nplt | grep 'stunnel' | awk {'print $4'} | cut -d: -f2 | xargs)" >>$PTs
+    # SSL Tunnel ports: sniproxy listeners (current) take precedence,
+    # falling back to legacy stunnel for un-migrated installs.
+    if screen -ls 2>/dev/null | grep -q '\.sniproxy_'; then
+        echo -e "SSL Tunel: $(screen -ls 2>/dev/null | awk '/\.sniproxy_/{split($1,a,"."); split(a[2],b,"_"); print b[2]}' | sort -nu | xargs)" >>$PTs
+    elif [[ -e "/etc/stunnel/stunnel.conf" ]]; then
+        echo -e "SSL Tunel: $(netstat -nplt | grep 'stunnel' | awk {'print $4'} | cut -d: -f2 | xargs)" >>$PTs
+    fi
     [[ -e "/etc/openvpn/server.conf" ]] && echo -e "Openvpn: $(netstat -nplt | grep 'openvpn' | awk {'print $4'} | cut -d: -f2 | xargs)" >>$PTs
     [[ "$(netstat -nplt | grep 'sslh' | wc -l)" != '0' ]] && echo -e "SSlh: $(netstat -nplt | grep 'sslh' | awk {'print $4'} | cut -d: -f2 | xargs)" >>$PTs
     [[ "$(netstat -nplt | grep 'squid' | wc -l)" != '0' ]] && echo -e "Squid: $(netstat -nplt | grep 'squid' | awk -F ":" {'print $4'} | xargs)" >>$PTs
