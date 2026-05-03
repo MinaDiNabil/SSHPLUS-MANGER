@@ -135,6 +135,15 @@ fun_force_update () {
   # exactly what the dynamic listener gets rid of.
   fun_migrate_to_sniproxy
 
+  # Patch the Squid HTTP proxy ACL. Old installs shipped a config that
+  # explicitly denied any destination domain other than the server's
+  # own IP and a tiny payload allow-list — so CONNECT requests to any
+  # bug host (paysecure.islamicbank.ps, *.gateway.mastercard.com,
+  # hcaptcha endpoints, ...) were rejected by Squid even when the SSH
+  # tunnel itself was healthy. This is the actual reason "works on
+  # the IP, fails on the domain" survived every previous fix.
+  fun_fix_squid_acl
+
   # Stop legacy multiplexers (refreshed wsproxy.py takes effect on
   # respawn) and any leftover stunnel service. /etc/autostart will
   # re-spawn the sniproxy + sslmux pairs we just registered on the
@@ -148,6 +157,140 @@ fun_force_update () {
 
   touch /tmp/.sshplus_force_ok
   return 0
+}
+
+# Repair the Squid ACL on existing installs. The original config was:
+#
+#     acl url1 dstdomain -i 127.0.0.1
+#     acl url2 dstdomain -i localhost
+#     acl url3 dstdomain -i $ipdovps
+#     acl url4 dstdomain -i /SSHPLUS?
+#     acl payload url_regex -i "$var_pay"
+#     acl all src 0.0.0.0/0
+#     http_access allow url1
+#     http_access allow url2
+#     http_access allow url3
+#     http_access allow url4
+#     http_access allow payload
+#     http_access deny all
+#
+# Any client-issued CONNECT (or GET) whose host wasn't 127.0.0.1,
+# localhost, the server IP, "/SSHPLUS?", or one of the four payload
+# domains hit `http_access deny all` and got refused. That's exactly
+# the user-visible behaviour "the same connection works when I point
+# the injector at the IP but fails when I point it at the domain":
+# the IP path matches `url3`, the bug-host path matches nothing.
+#
+# Replace those lines with an ACL that allows CONNECT to any host on
+# a safe TCP port (443/8443/80/...), keeps plain-HTTP restricted to
+# the bug-host list to avoid open-relay abuse, and refreshes the
+# payload list with the well-known carrier-zero-rated hosts so they
+# work out of the box. Idempotent: re-running adds nothing if the
+# config already has the new SSL_ports/CONNECT block.
+fun_fix_squid_acl () {
+  local _conf _pay _bak
+  for _candidate in /etc/squid/squid.conf /etc/squid3/squid.conf; do
+    if [[ -f "$_candidate" ]]; then
+      _conf="$_candidate"
+      _pay="${_candidate%/squid.conf}/payload.txt"
+      break
+    fi
+  done
+  [[ -z "$_conf" ]] && return 0
+
+  # The freshness check matches a comment unique to the new config so
+  # we can short-circuit when there is nothing to do.
+  if grep -q '^acl SSL_ports port' "$_conf" 2>/dev/null \
+     && grep -q 'http_access allow CONNECT Safe_ports' "$_conf" 2>/dev/null; then
+    return 0
+  fi
+
+  _bak="${_conf}.pre-sshplus-bughost.bak"
+  [[ -f "$_bak" ]] || cp -a "$_conf" "$_bak"
+
+  local _ipdovps _portas
+  _ipdovps=$(cat /etc/IP 2>/dev/null | tr -d '[:space:]')
+  [[ -z "$_ipdovps" ]] && _ipdovps=$(curl -s -m 5 https://api.ipify.org 2>/dev/null)
+  [[ -z "$_ipdovps" ]] && _ipdovps=$(hostname -I 2>/dev/null | awk '{print $1}')
+
+  # Preserve any http_port lines the user added through the menu.
+  _portas=$(awk '/^[[:space:]]*http_port[[:space:]]/ {print}' "$_conf")
+  [[ -z "$_portas" ]] && _portas="http_port 3128"
+
+  cat > "$_pay" <<-PAYLOAD_EOF
+	# Bug-host allow list for plain-HTTP requests through Squid.
+	# CONNECT (HTTPS) to any destination is already allowed
+	# unconditionally on the SSL_ports below — these entries
+	# only matter for non-encrypted GET/POST/HEAD payloads
+	# that mobile injectors send to zero-rated domains.
+	#
+	# Add one host or .domain per line. Lines starting with
+	# "#" are ignored. Wildcard form ".example.com" matches
+	# example.com and every subdomain.
+	.whatsapp.net
+	.whatsapp.com
+	.facebook.net
+	.facebook.com
+	.twitter.com
+	.speedtest.net
+	# Common payment / banking gateways used as bug hosts
+	.islamicbank.ps
+	.gateway.mastercard.com
+	.gbp.ma
+	# Captcha CDN endpoints commonly used as bug hosts
+	.hcaptcha.com
+	.recaptcha.net
+	PAYLOAD_EOF
+
+  cat > "$_conf" <<-CONF_EOF
+	# Allow CONNECT (HTTPS) to any destination — the request body
+	# is encrypted so Squid cannot be abused to inject content,
+	# and this is what makes bug-host SNIs (paysecure.islamicbank.ps,
+	# *.gateway.mastercard.com, hcaptcha endpoints, ...) work.
+	# Plain HTTP (GET/POST/HEAD) is still restricted to the
+	# server itself and to the bug-host list in $_pay so
+	# the proxy cannot be used as an open HTTP relay.
+	acl SSL_ports port 443 8443
+	acl Safe_ports port 80 443 1025-65535
+	acl CONNECT method CONNECT
+
+	acl url1 dstdomain -i 127.0.0.1
+	acl url2 dstdomain -i localhost
+	acl url3 dstdomain -i $_ipdovps
+	acl url4 dstdomain -i /SSHPLUS?
+	acl payload url_regex -i "$_pay"
+	acl all src 0.0.0.0/0
+
+	# Hard safety: never CONNECT to a port outside Safe_ports
+	# (blocks abuse like CONNECT 25 for spam relays) but allow
+	# any CONNECT destination on a safe port, especially 443.
+	http_access deny CONNECT !Safe_ports
+	http_access allow CONNECT Safe_ports
+
+	http_access allow url1
+	http_access allow url2
+	http_access allow url3
+	http_access allow url4
+	http_access allow payload
+	http_access deny all
+
+	#Portas
+	$_portas
+	#Nome squid
+	visible_hostname SSHPLUS
+	via off
+	forwarded_for off
+	pipeline_prefetch off
+	CONF_EOF
+
+  # Apply the new config; restart whichever flavour of Squid is here.
+  if [[ "$_conf" == /etc/squid/squid.conf ]]; then
+    /etc/init.d/squid restart >/dev/null 2>&1
+    service squid restart >/dev/null 2>&1
+  else
+    /etc/init.d/squid3 restart >/dev/null 2>&1
+    service squid3 restart >/dev/null 2>&1
+  fi
 }
 
 # Migrate a legacy static-cert stunnel install to the dynamic-SNI
