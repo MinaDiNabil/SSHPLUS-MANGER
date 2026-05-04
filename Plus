@@ -5,6 +5,11 @@ clear
     rm $HOME/Plus >/dev/null 2>&1
     exit 0
 }
+# Force apt and wget to IPv4. Many VPS images publish IPv6 AAAA records for
+# archive.ubuntu.com but have no working IPv6 route, so apt hangs/aborts on
+# "Network is unreachable" before any package can be fetched.
+echo 'Acquire::ForceIPv4 "true";' >/etc/apt/apt.conf.d/99force-ipv4
+grep -q '^inet4_only' /etc/wgetrc 2>/dev/null || echo 'inet4_only = on' >>/etc/wgetrc
 _lnk=$(echo 'z1:y#x.5s0ul&p4hs$s.0a72d*n-e!v89e032:3r' | sed -e 's/[^a-z.]//ig' | rev)
 _Ink=$(echo '/3×u3#s87r/l32o4×c1a×l1/83×l24×i0b×' | sed -e 's/[^a-z/]//ig')
 _1nk=$(echo '/3×u3#s×87r/83×l2×4×i0b×' | sed -e 's/[^a-z/]//ig')
