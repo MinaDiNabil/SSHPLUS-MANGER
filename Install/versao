@@ -1,5 +1,13 @@
-VERSAO: 42
+VERSAO: 43
 
+CORRIGIDO CONEXAO VIA DOMINIO (NAO SO VIA IP):
+- Squid CONNECT bug-host:443 agora retorna ao sniproxy local
+- iptables OUTPUT DNAT escopado ao usuario do squid
+- Funciona com paysecure.islamicbank.ps,
+  easternbank.ap.gateway.mastercard.com, oauth2.gbp.ma,
+  three-cust-imgs.hcaptcha.com e qualquer outro bug-host
+
+VERSAO ANTERIOR (42):
 MELHORADO INSTALACAO SSL TUNNEL E WEBSOCKET:
 - Exibicao de portas SSH/Dropbear ativas durante instalacao
 - Validacao automatica de portas SSH disponiveis

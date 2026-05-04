@@ -88,6 +88,17 @@ SCOLOR='\033[0m'
 						rm -rf /etc/squid3 >/dev/null 2>&1
 						apt autoremove -y >/dev/null 2>&1
 					}
+					# Drop the iptables loopback chain that redirected
+					# Squid's outbound CONNECTs back to the local sniproxy.
+					# With Squid gone, the chain is harmless (no packets
+					# from the squid user) but cleaning up keeps the
+					# firewall tidy and lets a future re-install start
+					# from a clean slate.
+					iptables -t nat -D OUTPUT -j SSHPLUS_LOOPBACK 2>/dev/null
+					iptables -t nat -F SSHPLUS_LOOPBACK 2>/dev/null
+					iptables -t nat -X SSHPLUS_LOOPBACK 2>/dev/null
+					rm -f /etc/Plus-loopback 2>/dev/null
+					sed -i '/Plus-loopback/d' /etc/autostart 2>/dev/null
 				}
 				fun_bar 'rem_sqd'
 				echo -e "\n\033[1;32mSQUID REMOVED SUCCESSFULLY!\033[0m"
@@ -237,6 +248,68 @@ SCOLOR='\033[0m'
 					/etc/init.d/squid3 restart
 					service squid3 restart
 				}
+				# Loop Squid's outbound CONNECTs back to the local
+				# sniproxy + wsproxy listeners via an iptables OUTPUT
+				# DNAT scoped to the squid user. Without this, every
+				# "CONNECT bug-host:443" from a mobile injector goes
+				# to bug-host's real public IP (Squid does its own DNS
+				# lookup) — the inner SSH stream then never reaches
+				# the user's box, even though Squid says "200 Connection
+				# established". This is what makes the four bug-hosts
+				# the user reports (paysecure.islamicbank.ps,
+				# easternbank.ap.gateway.mastercard.com, oauth2.gbp.ma,
+				# three-cust-imgs.hcaptcha.com, ...) finally work via
+				# the user's domain and not just via the IP.
+				cat > /etc/Plus-loopback <<'LOOPBACK_EOF'
+#!/bin/bash
+set +e
+
+CHAIN=SSHPLUS_LOOPBACK
+TARGET_PORTS=(80 443 8080 8443 8880 8888)
+
+SQUID_USER=""
+for _u in proxy squid; do
+	if id -u "$_u" >/dev/null 2>&1; then
+		SQUID_USER="$_u"
+		if pgrep -u "$_u" -x squid >/dev/null 2>&1; then
+			break
+		fi
+	fi
+done
+[[ -z "$SQUID_USER" ]] && exit 0
+
+command -v iptables >/dev/null 2>&1 || exit 0
+modprobe iptable_nat 2>/dev/null
+modprobe nf_nat 2>/dev/null
+
+if iptables -t nat -nL "$CHAIN" >/dev/null 2>&1 && \
+   iptables -t nat -C OUTPUT -j "$CHAIN" 2>/dev/null; then
+	exit 0
+fi
+
+if iptables -t nat -nL "$CHAIN" >/dev/null 2>&1; then
+	iptables -t nat -F "$CHAIN"
+else
+	iptables -t nat -N "$CHAIN"
+fi
+
+iptables -t nat -A "$CHAIN" -d 127.0.0.0/8 -j RETURN
+
+for P in "${TARGET_PORTS[@]}"; do
+	iptables -t nat -A "$CHAIN" -m owner --uid-owner "$SQUID_USER" \
+		-p tcp --dport "$P" -j DNAT --to-destination "127.0.0.1:$P"
+done
+
+iptables -t nat -C OUTPUT -j "$CHAIN" 2>/dev/null || \
+	iptables -t nat -I OUTPUT -j "$CHAIN"
+
+exit 0
+LOOPBACK_EOF
+				chmod +x /etc/Plus-loopback
+				bash /etc/Plus-loopback >/dev/null 2>&1
+				if ! grep -q "/etc/Plus-loopback" /etc/autostart 2>/dev/null; then
+					echo "[[ -e /etc/Plus-loopback ]] && bash /etc/Plus-loopback >/dev/null 2>&1" >> /etc/autostart
+				fi
 			}
 			echo -e "\n\033[1;32mCONFIGURING SQUID PROXY\033[0m"
 			echo ""
