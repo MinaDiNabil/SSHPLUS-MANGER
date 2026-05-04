@@ -1,5 +1,27 @@
-VERSAO: 43
+VERSAO: 44
 
+DOMAIN CHECK - DIAGNOSTICO DE CONEXAO POR DOMINIO:
+A causa raiz de "funciona via IP, falha via dominio" nas instalacoes
+onde os fixes anteriores nao resolveram esta SEMPRE antes do TLS:
+- DNS do dominio aponta pra IP errado (VPS antiga)
+- Dominio esta atras de Cloudflare (nuvem laranja) e o
+  Cloudflare reseta o handshake pq nao tem cert pro SNI
+  bug-host (paysecure.islamicbank.ps, etc)
+- Provedor cloud bloqueia 443 no security group
+
+A nova ferramenta /bin/domaincheck testa toda a cadeia:
+1) IP publico real do servidor (4 fontes confirmando)
+2) Resolucao DNS via 4 resolvers publicos
+3) Match dominio -> IP do servidor (com deteccao Cloudflare)
+4) Saude do sniproxy local com handshake real
+5) Teste end-to-end DOMINIO:443 com SNI bug-host
+6) Alcancabilidade externa do 443
+
+Imprime um veredicto claro com passos concretos por problema.
+Acessivel pelo MENU > MAIS > [31] DOMAIN CHECK ou direto:
+  domaincheck test.meudominio.com
+
+VERSAO ANTERIOR (43):
 CORRIGIDO CONEXAO VIA DOMINIO (NAO SO VIA IP):
 - Squid CONNECT bug-host:443 agora retorna ao sniproxy local
 - iptables OUTPUT DNAT escopado ao usuario do squid
