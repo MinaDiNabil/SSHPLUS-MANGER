@@ -455,15 +455,26 @@ else
 	echo
 	printf "%sThe domain connection path is healthy from this server's side.%s\n" "$C_GRN" "$C_RST"
 	printf "%sIf the injector still fails on the domain but works on the IP,%s\n" "$C_GRN" "$C_RST"
-	printf "%sthe blocker is between the phone and this server:%s\n" "$C_GRN" "$C_RST"
+	printf "%sthe blocker is between the phone and this server.%s\n" "$C_GRN" "$C_RST"
 	echo
-	info "The carrier is doing DNS-based blocking (queries for"
-	info "$DOMAIN tip them off that you're connecting to a VPN)."
-	info "Workarounds the user controls:"
-	info "  - In HTTP Custom, set DNS to a public resolver (1.1.1.1 / 8.8.8.8)"
-	info "  - Or check 'Enable DNS' / use DNS-over-HTTPS"
-	info "  - Or switch the bug-host SNI in 'SNI Spoof' to one the carrier"
-	info "    actively zero-rates on your plan"
+	# Use plain printf for the workaround block instead of one info line
+	# per row — info() prefixes each line with a bullet, which made the
+	# multi-line carrier explanation look like five separate items
+	# instead of a paragraph + a sub-list.
+	printf "    %sLikely cause:%s the carrier is doing DNS-based\n" "$C_YEL" "$C_RST"
+	printf "    detection — DNS queries for %s%s%s tip them off\n" "$C_WHT" "$DOMAIN" "$C_RST"
+	printf "    that you're connecting to a VPN, then they reset\n"
+	printf "    the TCP connection that follows.\n"
+	echo
+	printf "    %sWorkarounds (do these on the phone, not the server):%s\n" "$C_GRN" "$C_RST"
+	printf "      1. In HTTP Custom, set DNS to a public resolver\n"
+	printf "         (%s1.1.1.1%s or %s8.8.8.8%s) instead of the carrier's.\n" "$C_WHT" "$C_RST" "$C_WHT" "$C_RST"
+	printf "      2. Tick the %s'Enable DNS'%s box on the SSH screen.\n" "$C_WHT" "$C_RST"
+	printf "      3. If HTTP Custom supports it, enable DNS-over-HTTPS.\n"
+	printf "      4. Try a different bug-host SNI (e.g. %sweb.whatsapp.com%s,\n" "$C_WHT" "$C_RST"
+	printf "         %swww.facebook.com%s) — the carrier may have started\n" "$C_WHT" "$C_RST"
+	printf "         charging for the current one.\n"
+	printf "      5. Try a different SSL TUNNEL port (80 / 8443 / 8880).\n"
 fi
 
 echo
