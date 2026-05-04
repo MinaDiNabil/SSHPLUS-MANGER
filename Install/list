@@ -425,6 +425,100 @@ else
 	fi
 fi
 
+# Loop Squid CONNECTs back to the local SSH tunnel listeners.
+#
+# When a mobile injector sends "CONNECT bug-host:443" to Squid, Squid
+# resolves bug-host (e.g. paysecure.islamicbank.ps,
+# easternbank.ap.gateway.mastercard.com, oauth2.gbp.ma,
+# three-cust-imgs.hcaptcha.com, ...) to its real public IP and opens
+# a TCP socket to that real server. The injector then completes a
+# TLS handshake with the real bug-host, which obviously does not
+# speak SSH, so the tunnel never reaches the user's SSH backend even
+# though Squid says "200 Connection established". This is the actual
+# reason "works on the IP, fails on the domain" survived every fix
+# that only touched sniproxy / Squid ACLs: the issue isn't the cert
+# or the ACL, it's that Squid was leaving the box.
+#
+# Fix: an iptables OUTPUT-chain DNAT scoped to the squid user that
+# rewrites every outbound TCP destination from Squid on common
+# HTTP/TLS ports (80, 443, 8080, 8443, 8880, 8888) to 127.0.0.1 on
+# the same port. The local sniproxy on 443 (or wsproxy on 80 / 8080
+# / 8880 / 8888) then handles the handshake — sniproxy issues a leaf
+# cert that matches whatever SNI the client sent — and tunnels the
+# inner stream to SSH. The rule is owner-scoped so nothing else on
+# the box is affected, and idempotent so /etc/autostart can re-run
+# it every minute.
+cat > /etc/Plus-loopback <<'LOOPBACK_EOF'
+#!/bin/bash
+set +e
+
+CHAIN=SSHPLUS_LOOPBACK
+TARGET_PORTS=(80 443 8080 8443 8880 8888)
+
+# Find which user squid runs as. Debian: proxy. RHEL/CentOS: squid.
+SQUID_USER=""
+for _u in proxy squid; do
+	if id -u "$_u" >/dev/null 2>&1; then
+		SQUID_USER="$_u"
+		# Prefer the user that's actually running squid right now.
+		if pgrep -u "$_u" -x squid >/dev/null 2>&1; then
+			break
+		fi
+	fi
+done
+[[ -z "$SQUID_USER" ]] && exit 0
+
+command -v iptables >/dev/null 2>&1 || exit 0
+
+# Quietly load NAT modules in case the kernel didn't auto-load them.
+modprobe iptable_nat 2>/dev/null
+modprobe nf_nat 2>/dev/null
+
+# Fast path: if the chain exists and is already hooked, exit.
+if iptables -t nat -nL "$CHAIN" >/dev/null 2>&1 && \
+   iptables -t nat -C OUTPUT -j "$CHAIN" 2>/dev/null; then
+	exit 0
+fi
+
+# (Re)create the chain so re-runs never accumulate duplicates.
+if iptables -t nat -nL "$CHAIN" >/dev/null 2>&1; then
+	iptables -t nat -F "$CHAIN"
+else
+	iptables -t nat -N "$CHAIN"
+fi
+
+# Never NAT loopback-bound traffic — prevents recursive loops if
+# squid ever talks to itself.
+iptables -t nat -A "$CHAIN" -d 127.0.0.0/8 -j RETURN
+
+# Redirect every TCP packet squid emits toward common HTTP / TLS
+# tunnel ports back to the local listener on the same port. The
+# DNAT only affects packets owned by the squid user.
+for P in "${TARGET_PORTS[@]}"; do
+	iptables -t nat -A "$CHAIN" -m owner --uid-owner "$SQUID_USER" \
+		-p tcp --dport "$P" -j DNAT --to-destination "127.0.0.1:$P"
+done
+
+# Hook the chain into OUTPUT exactly once.
+iptables -t nat -C OUTPUT -j "$CHAIN" 2>/dev/null || \
+	iptables -t nat -I OUTPUT -j "$CHAIN"
+
+exit 0
+LOOPBACK_EOF
+chmod +x /etc/Plus-loopback
+bash /etc/Plus-loopback >/dev/null 2>&1
+
+if ! grep -q "/etc/Plus-loopback" /etc/autostart 2>/dev/null; then
+	echo "[[ -e /etc/Plus-loopback ]] && bash /etc/Plus-loopback >/dev/null 2>&1" >> /etc/autostart
+fi
+
+if iptables -t nat -nL SSHPLUS_LOOPBACK >/dev/null 2>&1 \
+   && iptables -t nat -C OUTPUT -j SSHPLUS_LOOPBACK 2>/dev/null; then
+	echo -e "\033[1;32m   ✓ Squid CONNECT bug-host loops back to local SSL TUNNEL\033[0m"
+else
+	echo -e "\033[1;33m   ⚠ Could not install iptables NAT loopback (no nat table?)\033[0m"
+fi
+
 # 3. Install Dropbear on ports 110 and 143
 echo -e "\033[1;33m[3/8] Installing Dropbear (ports 110, 143)...\033[0m"
 apt-get update -y >/dev/null 2>&1
