@@ -99,7 +99,7 @@ fun_force_update () {
                senharoot reiniciarservicos reiniciarsistema attscript \
                conexao delscript detalhes botssh infousers verifatt \
                limiter uexpired trojan-go onlineapp swapmemory \
-               initbot initcheck pkill.sh)
+               initbot initcheck pkill.sh domaincheck)
 
   for _arq in "${_mdls[@]}"; do
     if [[ -f "$src/Modulos/$_arq" ]]; then

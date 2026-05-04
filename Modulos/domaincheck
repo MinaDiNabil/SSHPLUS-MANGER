@@ -1,0 +1,482 @@
+#!/bin/bash
+# domaincheck — diagnose why an SSH-over-TLS connection works "via the
+# server IP" but fails "via the user's domain".
+#
+# This is the single most-reported and longest-running issue across
+# previous releases. Every prior fix focused on server-side TLS / Squid
+# behaviour (cert SAN, dynamic SNI, Squid ACL, OUTPUT DNAT) and none of
+# them ever made the slightest difference for users where the symptom
+# survived. The reason is simple: those fixes can only matter if the
+# client's TCP packets actually reach the server. When the symptom is
+# "failed connect to socket server" within the same second the client
+# typed the domain — i.e. *before* any TLS handshake even starts — the
+# problem is upstream of the TLS stack:
+#
+#   1. The user's domain doesn't resolve to this server's public IP.
+#      Common reasons:
+#        - The A record points at an old / different VPS.
+#        - The A record points at a Cloudflare proxy IP (the orange
+#          cloud), so the client connects to Cloudflare, sends a
+#          ClientHello whose SNI is a bug-host like
+#          paysecure.islamicbank.ps, and Cloudflare TCP-RSTs the
+#          connection because it has no cert for that name.
+#        - DNS hasn't propagated yet.
+#
+#   2. The user's domain *does* resolve to this server but a port-443
+#      filter / firewall on the upstream IP path blocks it (rare; would
+#      also block the IP path).
+#
+# Without diagnosing this from inside the server you end up doing the
+# same TLS work over and over and never converging. This script tests
+# the whole chain and prints exactly which step fails, with concrete
+# instructions to fix each case.
+#
+# Usage:
+#   domaincheck                       # interactive — prompts for domain
+#   domaincheck <domain>              # one-shot
+#   domaincheck <domain> <bug-host>   # also test handshake with this SNI
+
+set -u
+
+C_RST=$'\033[0m'
+C_RED=$'\033[1;31m'
+C_GRN=$'\033[1;32m'
+C_YEL=$'\033[1;33m'
+C_BLU=$'\033[1;34m'
+C_CYN=$'\033[1;36m'
+C_WHT=$'\033[1;37m'
+C_BAR=$'\033[0;34m'
+
+ok()   { printf "   %s✓%s %s\n" "$C_GRN" "$C_RST" "$*"; }
+bad()  { printf "   %s✗%s %s\n" "$C_RED" "$C_RST" "$*"; }
+warn() { printf "   %s!%s %s\n" "$C_YEL" "$C_RST" "$*"; }
+info() { printf "   %s•%s %s\n" "$C_CYN" "$C_RST" "$*"; }
+hdr()  { printf "\n%s━━━ %s%s%s ━━━%s\n" "$C_BAR" "$C_WHT" "$*" "$C_BAR" "$C_RST"; }
+
+ISSUES_FILE=$(mktemp -t domaincheck.XXXXXX) || exit 1
+trap 'rm -f "$ISSUES_FILE" 2>/dev/null' EXIT
+
+issue() {
+	# Record an issue with a short ID and a remediation message. Printed
+	# in the summary at the end so the user sees a numbered action list.
+	printf '%s\n' "$*" >>"$ISSUES_FILE"
+}
+
+clear
+
+printf "%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n" "$C_BAR" "$C_RST"
+printf "%s          ⇱ DOMAIN CONNECTION DIAGNOSTIC ⇲          %s\n" $'\E[41;1;37m' $'\E[0m'
+printf "%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n" "$C_BAR" "$C_RST"
+
+# Parse arguments / prompt for the domain.
+DOMAIN="${1:-}"
+SNI="${2:-paysecure.islamicbank.ps}"
+
+if [[ -z "$DOMAIN" ]]; then
+	echo
+	printf "%sEnter the domain you put in the injector (e.g. test.example.com)%s\n" "$C_YEL" "$C_RST"
+	printf "%sDomain%s: " "$C_GRN" "$C_RST"
+	read -r DOMAIN
+fi
+
+DOMAIN="${DOMAIN##*://}"      # strip scheme if pasted with one
+DOMAIN="${DOMAIN%%/*}"        # strip path
+DOMAIN="${DOMAIN%%:*}"        # strip :port
+DOMAIN="${DOMAIN,,}"          # lower-case
+
+if [[ -z "$DOMAIN" ]] || ! [[ "$DOMAIN" =~ ^[a-z0-9.-]+$ ]] || [[ "$DOMAIN" != *.* ]]; then
+	bad "Invalid domain. Try again with something like test.example.com"
+	exit 1
+fi
+
+# Make sure the tools we need are present. dig is the only non-default
+# one — apt-get install it quietly if it's missing.
+if ! command -v dig >/dev/null 2>&1; then
+	apt-get install -y dnsutils >/dev/null 2>&1
+fi
+
+DIG=$(command -v dig 2>/dev/null || true)
+NSLOOKUP=$(command -v nslookup 2>/dev/null || true)
+HOST=$(command -v host 2>/dev/null || true)
+GETENT=$(command -v getent 2>/dev/null || true)
+OPENSSL=$(command -v openssl 2>/dev/null || true)
+
+# 1) Server public IP — discover from multiple sources and reconcile.
+hdr "1. Server public IP"
+
+SERVER_IP_FILE=""
+SERVER_IP_ICAN=""
+SERVER_IP_AKAM=""
+SERVER_IP_IFY=""
+
+[[ -f /etc/IP ]] && SERVER_IP_FILE=$(tr -d '[:space:]' </etc/IP 2>/dev/null)
+SERVER_IP_ICAN=$(curl -fs4 -m 5 ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]')
+SERVER_IP_AKAM=$(curl -fs4 -m 5 https://whatismyip.akamai.com/ 2>/dev/null | tr -d '[:space:]')
+SERVER_IP_IFY=$(curl -fs4 -m 5 https://api.ipify.org 2>/dev/null | tr -d '[:space:]')
+
+[[ -n "$SERVER_IP_FILE" ]] && info "/etc/IP                : $SERVER_IP_FILE"
+[[ -n "$SERVER_IP_ICAN" ]] && info "ipv4.icanhazip.com     : $SERVER_IP_ICAN"
+[[ -n "$SERVER_IP_AKAM" ]] && info "whatismyip.akamai.com  : $SERVER_IP_AKAM"
+[[ -n "$SERVER_IP_IFY"  ]] && info "api.ipify.org          : $SERVER_IP_IFY"
+
+# Pick the IP that two or more sources agree on; fall back to whichever
+# source returned something. Treat /etc/IP as a tiebreaker.
+declare -A TALLY
+for v in "$SERVER_IP_ICAN" "$SERVER_IP_AKAM" "$SERVER_IP_IFY" "$SERVER_IP_FILE"; do
+	[[ -n "$v" ]] && TALLY["$v"]=$(( ${TALLY["$v"]:-0} + 1 ))
+done
+SERVER_IP=""
+SERVER_IP_VOTES=0
+for k in "${!TALLY[@]}"; do
+	if (( TALLY["$k"] > SERVER_IP_VOTES )); then
+		SERVER_IP="$k"
+		SERVER_IP_VOTES=${TALLY["$k"]}
+	fi
+done
+
+if [[ -z "$SERVER_IP" ]]; then
+	bad "Couldn't determine this server's public IP — no internet?"
+	issue "NO_NET|This server has no outbound internet right now. Check the VPS network/firewall."
+	SERVER_IP="(unknown)"
+elif (( SERVER_IP_VOTES >= 2 )); then
+	ok "Server public IP: $C_WHT$SERVER_IP$C_RST (confirmed by $SERVER_IP_VOTES sources)"
+else
+	warn "Server public IP: $SERVER_IP (only one source confirms — could be wrong)"
+fi
+
+# Detect mismatch between /etc/IP and the live public IP. If the VPS
+# was migrated, /etc/IP is stale and every service that reads from it
+# (Squid ACL, bot status page, etc.) is using the wrong address.
+if [[ -n "$SERVER_IP_FILE" ]] && [[ -n "$SERVER_IP_ICAN$SERVER_IP_AKAM$SERVER_IP_IFY" ]] \
+   && [[ "$SERVER_IP_FILE" != "$SERVER_IP" ]]; then
+	bad "/etc/IP ($SERVER_IP_FILE) doesn't match the live public IP ($SERVER_IP)"
+	issue "STALE_IP|/etc/IP is stale (says $SERVER_IP_FILE but live IP is $SERVER_IP). Run: echo $SERVER_IP > /etc/IP"
+fi
+
+# 2) Resolve the user's domain from several public resolvers — the
+# carrier could be hijacking the local resolver, so we always cross-check.
+hdr "2. DNS resolution for $DOMAIN"
+
+declare -A RESOLVED
+RESOLVED_ANY=0
+
+resolve_with() {
+	local label="$1" cmd="$2" out
+	out=$(eval "$cmd" 2>/dev/null \
+		| grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' \
+		| sort -u \
+		| paste -sd, -)
+	if [[ -n "$out" ]]; then
+		info "$label : $out"
+		RESOLVED["$label"]="$out"
+		RESOLVED_ANY=1
+		# Tally each unique IP across all resolvers for matching later.
+		IFS=, read -ra ips <<<"$out"
+		for ip in "${ips[@]}"; do
+			ALL_RESOLVED_IPS+=("$ip")
+		done
+	else
+		warn "$label : no answer"
+	fi
+}
+
+ALL_RESOLVED_IPS=()
+
+if [[ -n "$DIG" ]]; then
+	resolve_with "system DNS         " "$DIG +short +time=3 +tries=2 A '$DOMAIN'"
+	resolve_with "Google (8.8.8.8)   " "$DIG +short +time=3 +tries=2 @8.8.8.8 A '$DOMAIN'"
+	resolve_with "Cloudflare (1.1.1.1)" "$DIG +short +time=3 +tries=2 @1.1.1.1 A '$DOMAIN'"
+	resolve_with "Quad9 (9.9.9.9)    " "$DIG +short +time=3 +tries=2 @9.9.9.9 A '$DOMAIN'"
+elif [[ -n "$HOST" ]]; then
+	resolve_with "system DNS         " "$HOST -t A '$DOMAIN'"
+elif [[ -n "$GETENT" ]]; then
+	resolve_with "system DNS         " "$GETENT ahostsv4 '$DOMAIN'"
+elif [[ -n "$NSLOOKUP" ]]; then
+	resolve_with "system DNS         " "$NSLOOKUP -type=A '$DOMAIN' 8.8.8.8"
+fi
+
+if (( RESOLVED_ANY == 0 )); then
+	bad "No DNS resolver returned an A record for $DOMAIN"
+	issue "NO_DNS|$DOMAIN doesn't resolve. Add an A record at your DNS provider:  Type=A  Name=${DOMAIN%%.*}  Value=$SERVER_IP  TTL=300  (Proxy/Orange-cloud OFF)"
+	hdr "VERDICT"
+	bad "$C_WHT$DOMAIN$C_RST has no DNS record at all."
+	echo
+	printf "   Create an %sA record%s at your DNS provider pointing\n" "$C_GRN" "$C_RST"
+	printf "   %s$DOMAIN%s -> %s$SERVER_IP%s\n" "$C_WHT" "$C_RST" "$C_WHT" "$C_RST"
+	echo
+	exit 1
+fi
+
+# 3) Compare resolved IPs with the server IP and detect Cloudflare /
+# other proxy CDNs (the most common silent failure).
+hdr "3. Does $DOMAIN point to this server?"
+
+# Deduplicate.
+RESOLVED_UNIQ=$(printf '%s\n' "${ALL_RESOLVED_IPS[@]}" | sort -u | paste -sd, -)
+info "Resolved IPs (union): $RESOLVED_UNIQ"
+info "This server's IP    : $SERVER_IP"
+
+# Match check.
+MATCH=0
+for ip in "${ALL_RESOLVED_IPS[@]}"; do
+	[[ "$ip" == "$SERVER_IP" ]] && MATCH=1 && break
+done
+
+# Cloudflare proxy CIDRs — minimal in-memory list, accurate as of
+# the IPv4 ranges Cloudflare publishes at /ips-v4. We deliberately
+# embed the list rather than fetching it so the diagnostic still works
+# offline. Updating this is cheap; mismatched ranges only ever produce
+# a false-negative on "is this Cloudflare", never a false connection
+# failure (the rest of the test still runs).
+CF_RANGES=(
+	173.245.48.0/20    103.21.244.0/22  103.22.200.0/22  103.31.4.0/22
+	141.101.64.0/18    108.162.192.0/18 190.93.240.0/20  188.114.96.0/20
+	197.234.240.0/22   198.41.128.0/17  162.158.0.0/15   104.16.0.0/13
+	104.24.0.0/14      172.64.0.0/13    131.0.72.0/22
+)
+
+ip_in_cidr() {
+	local ip="$1" cidr="$2"
+	local base="${cidr%/*}" bits="${cidr#*/}"
+	local ip_n base_n mask
+	IFS=. read -r a b c d <<<"$ip"
+	ip_n=$(( (a<<24) | (b<<16) | (c<<8) | d ))
+	IFS=. read -r a b c d <<<"$base"
+	base_n=$(( (a<<24) | (b<<16) | (c<<8) | d ))
+	if (( bits == 0 )); then
+		mask=0
+	else
+		mask=$(( 0xFFFFFFFF & (0xFFFFFFFF << (32 - bits)) ))
+	fi
+	(( (ip_n & mask) == (base_n & mask) ))
+}
+
+is_cloudflare() {
+	local ip="$1"
+	for r in "${CF_RANGES[@]}"; do
+		ip_in_cidr "$ip" "$r" && return 0
+	done
+	return 1
+}
+
+CF_HIT=""
+for ip in "${ALL_RESOLVED_IPS[@]}"; do
+	if is_cloudflare "$ip"; then
+		CF_HIT="$ip"
+		break
+	fi
+done
+
+if (( MATCH == 1 )); then
+	ok "$DOMAIN resolves to this server ($SERVER_IP) — DNS is correct"
+elif [[ -n "$CF_HIT" ]]; then
+	bad "$DOMAIN points at Cloudflare ($CF_HIT), not at this server ($SERVER_IP)"
+	issue "CF_PROXY|Cloudflare proxy is in front of $DOMAIN. SSH-over-TLS doesn't work behind Cloudflare's proxy because Cloudflare terminates TLS itself and has no cert for bug-host SNIs (paysecure.islamicbank.ps, *.gateway.mastercard.com, ...). FIX: log in to Cloudflare, find the DNS record for $DOMAIN, and click the orange-cloud icon to turn it GREY (DNS only). Save and wait ~1 minute for propagation."
+else
+	bad "$DOMAIN points at $RESOLVED_UNIQ — none of which is this server ($SERVER_IP)"
+	issue "DNS_MISMATCH|$DOMAIN's A record points at $RESOLVED_UNIQ instead of $SERVER_IP. FIX: at your DNS provider, change the A record for $DOMAIN to $SERVER_IP and wait for propagation (usually 1-5 minutes)."
+fi
+
+# 4) Local listener health — sniproxy on 443 has to be up *and*
+# answering with a per-SNI cert. If it's dead the IP path doesn't work
+# either, so this isolates "the server is fine" vs "everything's down".
+hdr "4. Local listener health (sniproxy on 443)"
+
+LISTENER_OK=0
+if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
+	ok "Port 443 is listening"
+	LISTENER_OK=1
+	# Show what process owns 443 — usually sniproxy_443.py via screen,
+	# but if something else (apache, stunnel, nginx) raced in we want to
+	# call it out so the user doesn't restart the wrong thing.
+	HOLDER_443=$(ss -tlnpH 2>/dev/null | awk '$4 ~ /(^|:)443$/ {print $NF; exit}' | sed 's/.*"\([^"]*\)".*/\1/')
+	[[ -n "$HOLDER_443" ]] && info "Owned by: $HOLDER_443"
+	# Check whether the wsproxy multiplexer behind sniproxy is also up.
+	# Without it, sniproxy completes the TLS handshake and immediately
+	# closes when its backend connect to 127.0.0.1:700 fails — which on
+	# the wire looks like "5 bytes read, X bytes written".
+	if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(127\.0\.0\.1|0\.0\.0\.0):700$'; then
+		ok "Backend wsproxy multiplexer on 127.0.0.1:700 is up"
+	else
+		bad "Backend multiplexer (wsproxy on 127.0.0.1:700) is DOWN"
+		issue "NO_BACKEND|sniproxy is up on 443 but its backend wsproxy on 127.0.0.1:700 is dead. The TLS handshake completes server-side then fails to reach SSH, which on the wire looks like 'failed connect to socket server'. RESTART:  screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1"
+	fi
+else
+	bad "Port 443 is NOT listening on this server!"
+	issue "NO_443|Nothing is listening on port 443. Restart the SSL TUNNEL: bash -c 'screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700'  (and  screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1  if not already running)"
+fi
+
+if [[ -n "$OPENSSL" ]] && (( LISTENER_OK == 1 )); then
+	# Connect to ourselves over loopback and verify the cert subject
+	# matches the SNI we sent — that's the contract sniproxy promises.
+	# Capture the full s_client output (including the PEM cert block)
+	# and parse it the same way step 5 does, otherwise piping
+	# s_client's negotiated session info straight into `openssl x509`
+	# silently produces no subject and the test reports a false dead.
+	LOOPBACK_RAW=$(echo | timeout 5 "$OPENSSL" s_client \
+		-connect 127.0.0.1:443 \
+		-servername "$SNI" 2>&1)
+	LOOPBACK_CN=""
+	if echo "$LOOPBACK_RAW" | grep -q "BEGIN CERTIFICATE"; then
+		LOOPBACK_CN=$(echo "$LOOPBACK_RAW" \
+			| sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' \
+			| openssl x509 -noout -subject 2>/dev/null \
+			| sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([^,]*\).*/\1/p' \
+			| head -n1)
+	fi
+	if [[ "$LOOPBACK_CN" == "$SNI" ]]; then
+		ok "sniproxy issued a cert with CN=$SNI (dynamic SNI is working)"
+		LOOPBACK_OK=1
+	elif [[ -n "$LOOPBACK_CN" ]]; then
+		warn "sniproxy answered but CN is '$LOOPBACK_CN' instead of '$SNI'"
+		issue "SNI_MISMATCH|sniproxy is up but isn't generating per-SNI certs. Run:  attscript  and choose force-update, or restart it: screen -S sniproxy_443 -X quit; screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700"
+	else
+		# Defer the verdict: a healthy E2E in step 5 implicitly proves
+		# the loopback handshake works (E2E goes through the same
+		# sniproxy after DNS), so don't raise this if step 5 passes.
+		LOOPBACK_FAIL_PENDING=1
+		warn "Loopback handshake didn't return a parseable cert — will recheck via end-to-end test"
+	fi
+fi
+
+# 5) End-to-end test: connect to the user's domain (not its IP), do a
+# TLS handshake with the bug-host SNI, and verify we end up at *this*
+# server's sniproxy (cert CN matches the SNI we asked for). This is the
+# exact path the mobile injector takes — if it works here it'll work
+# from the phone too, modulo the carrier.
+hdr "5. End-to-end test against $DOMAIN:443 with SNI=$SNI"
+
+if (( MATCH == 0 )); then
+	warn "Skipping — DNS doesn't point at this server, the test would just"
+	warn "    measure whoever \$DOMAIN does point at (and would mislead)."
+elif [[ -z "$OPENSSL" ]]; then
+	warn "openssl missing — skipping end-to-end test."
+else
+	# Resolve domain explicitly so we follow the same path the user does:
+	# DNS lookup -> TCP connect -> ClientHello SNI=$SNI.
+	E2E_OUT=$(echo | timeout 8 "$OPENSSL" s_client \
+		-connect "$DOMAIN":443 \
+		-servername "$SNI" 2>&1)
+
+	if echo "$E2E_OUT" | grep -q "BEGIN CERTIFICATE"; then
+		E2E_CN=$(echo "$E2E_OUT" \
+			| sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' \
+			| openssl x509 -noout -subject 2>/dev/null \
+			| sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([^,]*\).*/\1/p' \
+			| head -n1)
+		if [[ "$E2E_CN" == "$SNI" ]]; then
+			ok "Connected to $DOMAIN:443 and got a cert for CN=$SNI"
+			ok "Domain path is fully working — the injector should connect"
+			E2E_OK=1
+		else
+			bad "Connected but the cert CN is '$E2E_CN', not '$SNI'"
+			issue "WRONG_SERVER|$DOMAIN:443 answered, but with a cert for '$E2E_CN' instead of the per-SNI cert from sniproxy. Something other than this server's sniproxy is on $DOMAIN:443 — likely a CDN or another VPS. See the DNS section above."
+		fi
+	else
+		ERR_LINE=$(echo "$E2E_OUT" | grep -E 'connect:|reset|refused|unreachable|timed? ?out|handshake' | head -n1)
+		bad "TLS handshake to $DOMAIN:443 failed${ERR_LINE:+: $ERR_LINE}"
+		issue "E2E_FAIL|TLS handshake to $DOMAIN:443 failed (${ERR_LINE:-unknown}). If DNS points here and port 443 is up, suspect a firewall in front of the server (cloud provider security group, ufw, iptables INPUT) or a captive portal between you and 443."
+	fi
+fi
+
+# If the loopback test couldn't parse a cert but the end-to-end test
+# did, the sniproxy is obviously healthy — the loopback parser just
+# didn't see the cert in time (slow openssl session resume, sometimes
+# observed on first run after an install). Don't surface it as a
+# blocker in that case.
+if [[ "${LOOPBACK_FAIL_PENDING:-0}" == 1 ]]; then
+	if [[ "${E2E_OK:-0}" == 1 ]]; then
+		ok "End-to-end test confirmed sniproxy is healthy — ignoring earlier loopback warning"
+	else
+		bad "Couldn't TLS-handshake with sniproxy on 127.0.0.1:443"
+		# Single-line copy-pasteable full restart. Stops every
+		# sniproxy/sslmux screen session, clears the cert cache (a
+		# corrupt cached cert is the #1 reason a previously working
+		# listener starts replying with a 5-byte TLS record header
+		# and then closing), then respawns the multiplexer + SNI
+		# terminator pair. /etc/autostart's per-minute check brings
+		# them back if they ever die again.
+		issue "SNIPROXY_DEAD|Port 443 is listening but the TLS handshake fails (this happens when the SNI cert cache is corrupt or the listener is half-alive). FULL RESTART (copy-paste this one line):  for s in \$(screen -ls 2>/dev/null | awk '/\\.(sniproxy_|sslmux)/ {sub(/^[0-9]+\\./, \"\", \$1); print \$1}'); do screen -S \"\$s\" -X quit; done; rm -rf /etc/stunnel/sni_cache/* 2>/dev/null; sleep 2; screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1; sleep 1; screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700; sleep 2; ss -tlnp | grep -E ':(443|700) '"
+	fi
+fi
+
+# 6) Outside-in port reachability. Even if everything looks right
+# locally, a cloud-provider security group can silently drop port 443
+# from the public internet. Use a free port-checker API.
+hdr "6. Outside-in reachability of $SERVER_IP:443"
+
+REACH=$(curl -fs -m 6 \
+	-H "Accept: application/json" \
+	"https://portchecker.io/api/v1/query?host=${SERVER_IP}&port=443" 2>/dev/null)
+if [[ -z "$REACH" ]]; then
+	# Fallback to a simpler check.
+	REACH_RAW=$(curl -fs -m 6 \
+		"https://api.hackertarget.com/nmap/?q=${SERVER_IP}" 2>/dev/null)
+	if echo "$REACH_RAW" | grep -qE '443/tcp[[:space:]]+open'; then
+		ok "Port 443 is reachable from the public internet"
+	elif echo "$REACH_RAW" | grep -qE '443/tcp[[:space:]]+(filtered|closed)'; then
+		bad "Port 443 is filtered/closed from the public internet"
+		issue "FW_443|Port 443 is unreachable from outside this server. Check the cloud-provider firewall (AWS Security Group, GCP firewall, DO Cloud Firewall) and the host firewall (ufw status / iptables -nL INPUT). Allow inbound TCP 443 from 0.0.0.0/0."
+	else
+		warn "Couldn't determine outside reachability (probe service unavailable)"
+	fi
+else
+	if echo "$REACH" | grep -qi '"open"[[:space:]]*:[[:space:]]*true'; then
+		ok "Port 443 is reachable from the public internet"
+	else
+		bad "Port 443 is NOT reachable from outside"
+		issue "FW_443|Port 443 is unreachable from outside this server. Check the cloud-provider firewall (AWS Security Group, GCP firewall, DO Cloud Firewall) and the host firewall (ufw status / iptables -nL INPUT). Allow inbound TCP 443 from 0.0.0.0/0."
+	fi
+fi
+
+# Print the verdict. If we found one or more issues, list them with
+# concrete remediation steps. Otherwise tell the user the server side
+# is healthy and the issue is downstream (carrier, mobile device, or
+# the injector configuration itself).
+hdr "VERDICT"
+
+if [[ -s "$ISSUES_FILE" ]]; then
+	printf "%sFound %d problem(s) blocking the domain path:%s\n" "$C_RED" \
+		"$(wc -l <"$ISSUES_FILE")" "$C_RST"
+	echo
+	N=0
+	while IFS='|' read -r code msg; do
+		N=$((N+1))
+		printf "%s[%d] %s%s\n" "$C_YEL" "$N" "$code" "$C_RST"
+		# Word-wrap the message to ~70 cols, indented.
+		echo "$msg" | fold -s -w 70 | sed "s/^/    /"
+		echo
+	done <"$ISSUES_FILE"
+	echo
+	printf "%sFix the issues above (top-to-bottom), then re-run:%s\n" "$C_GRN" "$C_RST"
+	printf "    %sdomaincheck %s%s\n" "$C_WHT" "$DOMAIN" "$C_RST"
+else
+	ok "All server-side checks passed."
+	echo
+	printf "%sThe domain connection path is healthy from this server's side.%s\n" "$C_GRN" "$C_RST"
+	printf "%sIf the injector still fails on the domain but works on the IP,%s\n" "$C_GRN" "$C_RST"
+	printf "%sthe blocker is between the phone and this server.%s\n" "$C_GRN" "$C_RST"
+	echo
+	# Use plain printf for the workaround block instead of one info line
+	# per row — info() prefixes each line with a bullet, which made the
+	# multi-line carrier explanation look like five separate items
+	# instead of a paragraph + a sub-list.
+	printf "    %sLikely cause:%s the carrier is doing DNS-based\n" "$C_YEL" "$C_RST"
+	printf "    detection — DNS queries for %s%s%s tip them off\n" "$C_WHT" "$DOMAIN" "$C_RST"
+	printf "    that you're connecting to a VPN, then they reset\n"
+	printf "    the TCP connection that follows.\n"
+	echo
+	printf "    %sWorkarounds (do these on the phone, not the server):%s\n" "$C_GRN" "$C_RST"
+	printf "      1. In HTTP Custom, set DNS to a public resolver\n"
+	printf "         (%s1.1.1.1%s or %s8.8.8.8%s) instead of the carrier's.\n" "$C_WHT" "$C_RST" "$C_WHT" "$C_RST"
+	printf "      2. Tick the %s'Enable DNS'%s box on the SSH screen.\n" "$C_WHT" "$C_RST"
+	printf "      3. If HTTP Custom supports it, enable DNS-over-HTTPS.\n"
+	printf "      4. Try a different bug-host SNI (e.g. %sweb.whatsapp.com%s,\n" "$C_WHT" "$C_RST"
+	printf "         %swww.facebook.com%s) — the carrier may have started\n" "$C_WHT" "$C_RST"
+	printf "         charging for the current one.\n"
+	printf "      5. Try a different SSL TUNNEL port (80 / 8443 / 8880).\n"
+fi
+
+echo
+printf "%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n" "$C_BAR" "$C_RST"
+echo
