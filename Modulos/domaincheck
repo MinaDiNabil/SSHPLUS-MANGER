@@ -294,20 +294,33 @@ fi
 if [[ -n "$OPENSSL" ]] && (( LISTENER_OK == 1 )); then
 	# Connect to ourselves over loopback and verify the cert subject
 	# matches the SNI we sent — that's the contract sniproxy promises.
-	LOOPBACK_OUT=$(echo | timeout 5 "$OPENSSL" s_client \
+	# Capture the full s_client output (including the PEM cert block)
+	# and parse it the same way step 5 does, otherwise piping
+	# s_client's negotiated session info straight into `openssl x509`
+	# silently produces no subject and the test reports a false dead.
+	LOOPBACK_RAW=$(echo | timeout 5 "$OPENSSL" s_client \
 		-connect 127.0.0.1:443 \
-		-servername "$SNI" \
-		-verify_return_error 0 2>/dev/null \
-		| openssl x509 -noout -subject 2>/dev/null)
-	if echo "$LOOPBACK_OUT" | grep -qi "CN[[:space:]]*=[[:space:]]*$SNI"; then
+		-servername "$SNI" 2>&1)
+	LOOPBACK_CN=""
+	if echo "$LOOPBACK_RAW" | grep -q "BEGIN CERTIFICATE"; then
+		LOOPBACK_CN=$(echo "$LOOPBACK_RAW" \
+			| sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' \
+			| openssl x509 -noout -subject 2>/dev/null \
+			| sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([^,]*\).*/\1/p' \
+			| head -n1)
+	fi
+	if [[ "$LOOPBACK_CN" == "$SNI" ]]; then
 		ok "sniproxy issued a cert with CN=$SNI (dynamic SNI is working)"
-	elif [[ -n "$LOOPBACK_OUT" ]]; then
-		warn "sniproxy answered but CN doesn't match the SNI:"
-		warn "    $LOOPBACK_OUT"
+		LOOPBACK_OK=1
+	elif [[ -n "$LOOPBACK_CN" ]]; then
+		warn "sniproxy answered but CN is '$LOOPBACK_CN' instead of '$SNI'"
 		issue "SNI_MISMATCH|sniproxy is up but isn't generating per-SNI certs. Run:  attscript  and choose force-update, or restart it: screen -S sniproxy_443 -X quit; screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700"
 	else
-		bad "Couldn't TLS-handshake with sniproxy on 127.0.0.1:443"
-		issue "SNIPROXY_DEAD|Port 443 is listening but the TLS handshake failed. Check the sniproxy session: screen -r sniproxy_443"
+		# Defer the verdict: a healthy E2E in step 5 implicitly proves
+		# the loopback handshake works (E2E goes through the same
+		# sniproxy after DNS), so don't raise this if step 5 passes.
+		LOOPBACK_FAIL_PENDING=1
+		warn "Loopback handshake didn't return a parseable cert — will recheck via end-to-end test"
 	fi
 fi
 
@@ -339,6 +352,7 @@ else
 		if [[ "$E2E_CN" == "$SNI" ]]; then
 			ok "Connected to $DOMAIN:443 and got a cert for CN=$SNI"
 			ok "Domain path is fully working — the injector should connect"
+			E2E_OK=1
 		else
 			bad "Connected but the cert CN is '$E2E_CN', not '$SNI'"
 			issue "WRONG_SERVER|$DOMAIN:443 answered, but with a cert for '$E2E_CN' instead of the per-SNI cert from sniproxy. Something other than this server's sniproxy is on $DOMAIN:443 — likely a CDN or another VPS. See the DNS section above."
@@ -347,6 +361,20 @@ else
 		ERR_LINE=$(echo "$E2E_OUT" | grep -E 'connect:|reset|refused|unreachable|timed? ?out|handshake' | head -n1)
 		bad "TLS handshake to $DOMAIN:443 failed${ERR_LINE:+: $ERR_LINE}"
 		issue "E2E_FAIL|TLS handshake to $DOMAIN:443 failed (${ERR_LINE:-unknown}). If DNS points here and port 443 is up, suspect a firewall in front of the server (cloud provider security group, ufw, iptables INPUT) or a captive portal between you and 443."
+	fi
+fi
+
+# If the loopback test couldn't parse a cert but the end-to-end test
+# did, the sniproxy is obviously healthy — the loopback parser just
+# didn't see the cert in time (slow openssl session resume, sometimes
+# observed on first run after an install). Don't surface it as a
+# blocker in that case.
+if [[ "${LOOPBACK_FAIL_PENDING:-0}" == 1 ]]; then
+	if [[ "${E2E_OK:-0}" == 1 ]]; then
+		ok "End-to-end test confirmed sniproxy is healthy — ignoring earlier loopback warning"
+	else
+		bad "Couldn't TLS-handshake with sniproxy on 127.0.0.1:443"
+		issue "SNIPROXY_DEAD|Port 443 is listening but the TLS handshake failed. Check the sniproxy session: screen -r sniproxy_443  (Ctrl+A then D to detach). If it's gone, restart it: screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700"
 	fi
 fi
 
