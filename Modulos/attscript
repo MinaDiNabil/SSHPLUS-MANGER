@@ -150,6 +150,36 @@ fun_force_update () {
     chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 /etc/stunnel/stunnel.pem 2>/dev/null
     [[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
 
+    # Free port 443 from nginx / apache / caddy if they're squatting on
+    # it. Without this, the injector hits the wrong daemon, the SSL
+    # TUNNEL never sees the traffic, and the client logs "HTTP/1.1 526"
+    # or "HTTP/1.1 400 Bad Request" instead of a proper SSH handshake.
+    _holder443=$(ss -tlnpH 2>/dev/null | awk '$4 ~ /(^|:)443$/ {print $NF; exit}')
+    if echo "$_holder443" | grep -qE 'apache2|httpd'; then
+      sed -i 's/^[[:space:]]*Listen[[:space:]]\+443[[:space:]]*$/Listen 8443/g' /etc/apache2/ports.conf 2>/dev/null
+      sed -i 's/<VirtualHost[[:space:]]\+\*:443>/<VirtualHost *:8443>/g' /etc/apache2/sites-enabled/*.conf 2>/dev/null
+      service apache2 restart >/dev/null 2>&1
+    elif echo "$_holder443" | grep -qE 'nginx'; then
+      for _f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf /etc/nginx/nginx.conf; do
+        [[ -f "$_f" ]] || continue
+        sed -i -E 's/(\<listen\b[[:space:]]+(\[[^]]*\]:)?)443\b/\18443/g' "$_f" 2>/dev/null
+      done
+      nginx -t >/dev/null 2>&1 && (systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null || systemctl restart nginx 2>/dev/null)
+    fi
+    sleep 1
+
+    # If anything (caddy/haproxy/leftover process) still owns 443,
+    # force-stop it so stunnel4 can take over.
+    if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
+      _holder443=$(ss -tlnpH 2>/dev/null | awk '$4 ~ /(^|:)443$/ {print $NF; exit}')
+      if ! echo "$_holder443" | grep -qE 'stunnel'; then
+        for _svc in apache2 httpd nginx caddy haproxy; do
+          systemctl stop "$_svc" >/dev/null 2>&1
+        done
+      fi
+      sleep 1
+    fi
+
     # Migrate old installs whose stunnel.conf still points straight at
     # sshd:22 — that breaks WS SSL+Payload and WS SSL+Payload+Proxy.
     # Repoint at the wsproxy multiplexer on 127.0.0.1:700 and bring
