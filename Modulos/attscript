@@ -143,11 +143,30 @@ fun_force_update () {
     screen -S "$s" -X quit 2>/dev/null
   done
 
-  # Make sure stunnel4 is running if its config exists.
+  # Make sure stunnel4 is running if its config exists, and that the
+  # keep-alive watchdog is registered.
   if [[ -f /etc/stunnel/stunnel.conf && -s /etc/stunnel/stunnel.pem ]]; then
+    mkdir -p /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
+    chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 /etc/stunnel/stunnel.pem 2>/dev/null
     [[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
     systemctl enable stunnel4 >/dev/null 2>&1
+    systemctl daemon-reload >/dev/null 2>&1
     service stunnel4 restart >/dev/null 2>&1
+
+    if ! grep -q '# SSHPLUS_STUNNEL_WATCHDOG' /etc/autostart 2>/dev/null; then
+      cat >>/etc/autostart <<'WATCH_EOF'
+# SSHPLUS_STUNNEL_WATCHDOG
+if [[ -f /etc/stunnel/stunnel.conf ]]; then
+	_acc=$(grep -E '^[[:space:]]*accept[[:space:]]*=' /etc/stunnel/stunnel.conf | awk -F'=' '{gsub(/[[:space:]]/,"",$2); print $2}' | awk -F: '{print $NF}')
+	for _p in $_acc; do
+		if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${_p}\$"; then
+			service stunnel4 restart >/dev/null 2>&1
+			break
+		fi
+	done
+fi
+WATCH_EOF
+    fi
   fi
 
   [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1

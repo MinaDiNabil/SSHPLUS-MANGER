@@ -915,38 +915,102 @@ LOOPBACK_EOF
 				}
 				verif_ptrs $porta
 				[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/tcp >/dev/null 2>&1
+
+				# Move apache2 off the chosen port if it's squatting on it.
+				if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${porta}\$"; then
+					_holder=$(ss -tlnpH 2>/dev/null | awk -v p=":${porta}$" '$4 ~ p {print $NF; exit}')
+					if echo "$_holder" | grep -qE 'apache2|httpd'; then
+						sed -i "s/^[[:space:]]*Listen[[:space:]]\+${porta}[[:space:]]*\$/Listen 8443/g" /etc/apache2/ports.conf 2>/dev/null
+						service apache2 restart >/dev/null 2>&1
+						sleep 1
+					fi
+				fi
+
 				echo -e "\n\033[1;32mINSTALLING SSL TUNNEL!\033[1;33m"
 				echo ""
 				fun_bar 'apt-get update -y' 'apt-get install stunnel4 -y'
 				echo -e "\n\033[1;32mCONFIGURING SSL TUNNEL!\033[0m"
 				echo ""
 				ssl_conf() {
-					mkdir -p /etc/stunnel
-					echo -e "cert = /etc/stunnel/stunnel.pem\nclient = no\nsocket = a:SO_REUSEADDR=1\nsocket = l:TCP_NODELAY=1\nsocket = r:TCP_NODELAY=1\n\n[stunnel]\nconnect = 127.0.0.1:${portssl}\naccept = ${porta}" >/etc/stunnel/stunnel.conf
+					mkdir -p /etc/stunnel /var/run/stunnel4 /var/log/stunnel4
+					chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
+					cat >/etc/stunnel/stunnel.conf <<-STUNNEL_CONF
+						; SSHPlus SSL TUNNEL — stable configuration.
+						pid = /var/run/stunnel4/stunnel.pid
+						output = /var/log/stunnel4/stunnel.log
+						debug = 4
+						syslog = no
+
+						cert = /etc/stunnel/stunnel.pem
+						client = no
+
+						socket = a:SO_REUSEADDR=1
+						socket = a:SO_KEEPALIVE=1
+						socket = a:TCP_KEEPIDLE=60
+						socket = a:TCP_KEEPINTVL=15
+						socket = a:TCP_KEEPCNT=4
+						socket = l:TCP_NODELAY=1
+						socket = l:SO_KEEPALIVE=1
+						socket = r:TCP_NODELAY=1
+						socket = r:SO_KEEPALIVE=1
+
+						TIMEOUTbusy = 300
+						TIMEOUTclose = 0
+						TIMEOUTconnect = 30
+						TIMEOUTidle = 86400
+
+						[stunnel]
+						connect = 127.0.0.1:${portssl}
+						accept = ${porta}
+					STUNNEL_CONF
 				}
 				fun_bar 'ssl_conf'
 				echo -e "\n\033[1;32mCREATING CERTIFICATE!\033[0m"
 				echo ""
 				ssl_certif() {
-					rm -f /etc/stunnel/stunnel.pem
-					openssl genrsa -out /tmp/key.pem 2048 >/dev/null 2>&1
-					openssl req -new -x509 -key /tmp/key.pem -out /tmp/cert.pem -days 1050 -subj "/C=US/ST=NA/L=NA/O=SSHPlus/OU=SSHPlus/CN=sshplus.local" >/dev/null 2>&1
-					cat /tmp/cert.pem /tmp/key.pem >>/etc/stunnel/stunnel.pem
+					if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
+						openssl genrsa -out /tmp/key.pem 2048 >/dev/null 2>&1
+						openssl req -new -x509 -key /tmp/key.pem -out /tmp/cert.pem -days 3650 -subj "/C=US/ST=NA/L=NA/O=SSHPlus/OU=SSHPlus/CN=sshplus.local" >/dev/null 2>&1
+						cat /tmp/cert.pem /tmp/key.pem >/etc/stunnel/stunnel.pem
+						rm -f /tmp/cert.pem /tmp/key.pem
+					fi
+					chown stunnel4:stunnel4 /etc/stunnel/stunnel.pem 2>/dev/null
 					chmod 600 /etc/stunnel/stunnel.pem
-					rm -f /tmp/cert.pem /tmp/key.pem
-					[[ -f /etc/default/stunnel4 ]] && sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4
+					[[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/g' /etc/default/stunnel4
+					systemctl enable stunnel4 >/dev/null 2>&1
+					systemctl daemon-reload >/dev/null 2>&1
 				}
 				fun_bar 'ssl_certif'
 				echo -e "\n\033[1;32mSTARTING SSL TUNNEL!\033[0m"
 				echo ""
 				fun_finssl() {
 					service stunnel4 restart >/dev/null 2>&1
-					service ssh restart >/dev/null 2>&1
 					/etc/init.d/stunnel4 restart >/dev/null 2>&1
+					# Register the keep-alive watchdog so stunnel is
+					# resurrected within a minute if it ever dies.
+					if ! grep -q '# SSHPLUS_STUNNEL_WATCHDOG' /etc/autostart 2>/dev/null; then
+						cat >>/etc/autostart <<-'WATCH_EOF'
+							# SSHPLUS_STUNNEL_WATCHDOG
+							if [[ -f /etc/stunnel/stunnel.conf ]]; then
+								_acc=$(grep -E '^[[:space:]]*accept[[:space:]]*=' /etc/stunnel/stunnel.conf | awk -F'=' '{gsub(/[[:space:]]/,"",$2); print $2}' | awk -F: '{print $NF}')
+								for _p in $_acc; do
+									if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${_p}\$"; then
+										service stunnel4 restart >/dev/null 2>&1
+										break
+									fi
+								done
+							fi
+						WATCH_EOF
+					fi
 				}
 				fun_bar 'fun_finssl' 'service stunnel4 restart'
-				echo -e "\n\033[1;32mSSL TUNNEL INSTALLED SUCCESSFULLY!\033[1;31m PORT: \033[1;33m$porta\033[0m"
 				sleep 2
+				if netstat -nltp 2>/dev/null | grep -q "stunnel4.*:${porta}"; then
+					echo -e "\n\033[1;32mSSL TUNNEL INSTALLED SUCCESSFULLY!\033[1;31m PORT: \033[1;33m$porta\033[0m"
+				else
+					echo -e "\n\033[1;31mWARNING: stunnel4 did not bind port $porta. Check 'service stunnel4 status'.\033[0m"
+				fi
+				sleep 3
 				clear
 				fun_conexao
 			} || {
@@ -2492,12 +2556,24 @@ exit 0' >$RCLOCAL
 			} || {
 				sts4="\033[1;31m○ "
 			}
-			[[ -e "/etc/stunnel/stunnel.conf" ]] && {
-				echo -e "\033[1;32mSERVICE: \033[1;33mSSL TUNNEL \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'stunnel' | awk {'print $4'} | cut -d: -f2 | xargs)"
-				sts3="\033[1;32m◉ "
-			} || {
+			if [[ -e "/etc/stunnel/stunnel.conf" ]]; then
+				_ssl_ports=$(netstat -nplt 2>/dev/null | grep 'stunnel' | awk '{print $4}' | awk -F: '{print $NF}' | sort -nu | xargs)
+				if [[ -z "$_ssl_ports" ]]; then
+					# Config exists but stunnel isn't listening — auto-revive.
+					service stunnel4 restart >/dev/null 2>&1
+					sleep 1
+					_ssl_ports=$(netstat -nplt 2>/dev/null | grep 'stunnel' | awk '{print $4}' | awk -F: '{print $NF}' | sort -nu | xargs)
+				fi
+				if [[ -n "$_ssl_ports" ]]; then
+					echo -e "\033[1;32mSERVICE: \033[1;33mSSL TUNNEL \033[1;32mPORT: \033[1;37m$_ssl_ports"
+					sts3="\033[1;32m◉ "
+				else
+					echo -e "\033[1;32mSERVICE: \033[1;33mSSL TUNNEL \033[1;31m(configured but not listening)"
+					sts3="\033[1;33m◐ "
+				fi
+			else
 				sts3="\033[1;31m○ "
-			}
+			fi
 			[[ "$(netstat -tlpn | grep 'dropbear' | wc -l)" != '0' ]] && {
 				echo -e "\033[1;32mSERVICE: \033[1;33mDROPBEAR \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'dropbear' | awk -F ":" {'print $4'} | xargs)"
 				sts2="\033[1;32m◉ "
