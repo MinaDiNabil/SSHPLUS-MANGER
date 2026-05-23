@@ -41,9 +41,10 @@ class Server(threading.Thread):
     def run(self):
         self.soc = socket.socket(socket.AF_INET)
         self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         self.soc.settimeout(2)
         self.soc.bind((self.host, self.port))
-        self.soc.listen(0)
+        self.soc.listen(128)
         self.running = True
 
         try:
@@ -51,10 +52,18 @@ class Server(threading.Thread):
                 try:
                     c, addr = self.soc.accept()
                     c.setblocking(1)
+                    c.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    try:
+                        c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except (AttributeError, OSError):
+                        pass
                 except socket.timeout:
+                    continue
+                except OSError:
                     continue
 
                 conn = ConnectionHandler(c, self, addr)
+                conn.daemon = True
                 conn.start()
                 self.addConn(conn)
         finally:
@@ -188,6 +197,11 @@ class ConnectionHandler(threading.Thread):
         (soc_family, soc_type, proto, _, address) = socket.getaddrinfo(host, port)[0]
 
         self.target = socket.socket(soc_family, soc_type, proto)
+        self.target.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        try:
+            self.target.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except (AttributeError, OSError):
+            pass
         self.targetClosed = False
         self.target.connect(address)
 

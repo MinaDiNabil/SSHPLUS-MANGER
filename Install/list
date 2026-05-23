@@ -159,17 +159,37 @@ net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 net.ipv4.icmp_echo_ignore_broadcasts = 1
 
+# --- Connection tracking (prevents 'nf_conntrack: table full' under
+# load, which silently drops new flows and looks like a tunnel
+# outage). Sized for a multi-thousand-user tunneling box. ---
+net.netfilter.nf_conntrack_max = 1048576
+net.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 86400
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
+net.netfilter.nf_conntrack_buckets = 262144
+
 # --- Filesystem & memory ---
 fs.file-max = 2097152
 fs.nr_open = 2097152
 vm.swappiness = 10
 vm.dirty_ratio = 10
 vm.dirty_background_ratio = 5
+vm.overcommit_memory = 1
 
 # --- Auto-reboot on kernel panic to avoid stuck VPS ---
 kernel.panic = 10
 kernel.panic_on_oops = 1
 SYSCTL_EOF
+
+# nf_conntrack module must be loaded before its sysctls work — and
+# the hashsize is only settable as a module parameter, not via sysctl
+# on most kernels.
+modprobe nf_conntrack 2>/dev/null
+echo 262144 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+grep -qx nf_conntrack /etc/modules-load.d/sshplus-conntrack.conf 2>/dev/null || \
+	echo nf_conntrack > /etc/modules-load.d/sshplus-conntrack.conf
 
 # Apply the new tunables (and reload anything in /etc/sysctl.d)
 sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-sshplus.conf >/dev/null 2>&1
@@ -723,6 +743,74 @@ if iptables -nL BLOCK_TORRENT >/dev/null 2>&1; then
 	echo -e "\033[1;32m   ✓ BLOCK TORRENT enabled (BLOCK_TORRENT chain → FORWARD)\033[0m"
 else
 	echo -e "\033[1;31m   ✗ BLOCK TORRENT chain creation failed.\033[0m"
+fi
+
+# 9. Log rotation. Stunnel/python proxies write to flat files that
+# would otherwise grow unbounded and fill /var, which silently kills
+# every tunneling service on the box.
+cat >/etc/logrotate.d/sshplus <<'LOGROTATE_EOF'
+/var/log/stunnel4/*.log {
+	daily
+	rotate 7
+	maxsize 50M
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+	su stunnel4 stunnel4
+}
+/var/log/sshplus/*.log {
+	daily
+	rotate 7
+	maxsize 20M
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+}
+LOGROTATE_EOF
+mkdir -p /var/log/sshplus
+
+# 10. Unified service watchdog. Cron runs /etc/autostart every minute;
+# this block re-checks every long-lived tunneling service and revives
+# whatever has died. Each service is gated so the watchdog only acts
+# on services that were actually installed.
+if ! grep -q '# SSHPLUS_SERVICE_WATCHDOG' /etc/autostart 2>/dev/null; then
+	cat >>/etc/autostart <<'SVC_WATCH_EOF'
+# SSHPLUS_SERVICE_WATCHDOG
+# Auto-revive any installed tunneling service that fell over.
+_sshplus_watch() {
+	local _svc="$1" _check="$2"
+	systemctl list-unit-files 2>/dev/null | grep -qw "${_svc}.service" || return 0
+	if ! eval "$_check" >/dev/null 2>&1; then
+		systemctl restart "$_svc" >/dev/null 2>&1 || service "$_svc" restart >/dev/null 2>&1
+	fi
+}
+_sshplus_watch ssh       'pgrep -x sshd'
+_sshplus_watch dropbear  'pgrep -x dropbear'
+[[ -f /etc/stunnel/stunnel.conf ]] && _sshplus_watch stunnel4 'pgrep -x stunnel4'
+[[ -f /etc/openvpn/server.conf ]]  && _sshplus_watch openvpn  'pgrep -x openvpn'
+[[ -f /etc/squid/squid.conf ]]     && _sshplus_watch squid    'pgrep -x squid'
+[[ -f /etc/squid3/squid.conf ]]    && _sshplus_watch squid3   'pgrep -x squid'
+unset -f _sshplus_watch
+
+# Lower OOM-kill priority for tunneling daemons so the kernel kills
+# misbehaving user shells first under memory pressure.
+for _p in $(pgrep -x sshd) $(pgrep -x dropbear) $(pgrep -x stunnel4) \
+          $(pgrep -x openvpn) $(pgrep -x squid); do
+	[[ -w "/proc/$_p/oom_score_adj" ]] && echo -500 > "/proc/$_p/oom_score_adj" 2>/dev/null
+done
+SVC_WATCH_EOF
+fi
+
+# 11. Daily restart of Python proxies — these are long-running screen
+# sessions whose memory footprint creeps up over weeks. A 04:00 restart
+# is invisible to active sessions (SSH reconnects in <1s) and prevents
+# the slow leak from ever mattering.
+if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
+	(crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
 fi
 
 echo ""

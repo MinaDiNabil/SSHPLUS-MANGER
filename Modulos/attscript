@@ -152,9 +152,12 @@ fun_force_update () {
     systemctl enable stunnel4 >/dev/null 2>&1
     systemctl daemon-reload >/dev/null 2>&1
     service stunnel4 restart >/dev/null 2>&1
+  fi
 
-    if ! grep -q '# SSHPLUS_STUNNEL_WATCHDOG' /etc/autostart 2>/dev/null; then
-      cat >>/etc/autostart <<'WATCH_EOF'
+  # Refresh /etc/autostart with the unified watchdog + stunnel watchdog
+  # blocks. Older installs that pre-date these blocks pick them up here.
+  if ! grep -q '# SSHPLUS_STUNNEL_WATCHDOG' /etc/autostart 2>/dev/null; then
+    cat >>/etc/autostart <<'WATCH_EOF'
 # SSHPLUS_STUNNEL_WATCHDOG
 if [[ -f /etc/stunnel/stunnel.conf ]]; then
 	_acc=$(grep -E '^[[:space:]]*accept[[:space:]]*=' /etc/stunnel/stunnel.conf | awk -F'=' '{gsub(/[[:space:]]/,"",$2); print $2}' | awk -F: '{print $NF}')
@@ -166,7 +169,82 @@ if [[ -f /etc/stunnel/stunnel.conf ]]; then
 	done
 fi
 WATCH_EOF
-    fi
+  fi
+  if ! grep -q '# SSHPLUS_SERVICE_WATCHDOG' /etc/autostart 2>/dev/null; then
+    cat >>/etc/autostart <<'SVC_WATCH_EOF'
+# SSHPLUS_SERVICE_WATCHDOG
+_sshplus_watch() {
+	local _svc="$1" _check="$2"
+	systemctl list-unit-files 2>/dev/null | grep -qw "${_svc}.service" || return 0
+	if ! eval "$_check" >/dev/null 2>&1; then
+		systemctl restart "$_svc" >/dev/null 2>&1 || service "$_svc" restart >/dev/null 2>&1
+	fi
+}
+_sshplus_watch ssh       'pgrep -x sshd'
+_sshplus_watch dropbear  'pgrep -x dropbear'
+[[ -f /etc/stunnel/stunnel.conf ]] && _sshplus_watch stunnel4 'pgrep -x stunnel4'
+[[ -f /etc/openvpn/server.conf ]]  && _sshplus_watch openvpn  'pgrep -x openvpn'
+[[ -f /etc/squid/squid.conf ]]     && _sshplus_watch squid    'pgrep -x squid'
+[[ -f /etc/squid3/squid.conf ]]    && _sshplus_watch squid3   'pgrep -x squid'
+unset -f _sshplus_watch
+for _p in $(pgrep -x sshd) $(pgrep -x dropbear) $(pgrep -x stunnel4) \
+          $(pgrep -x openvpn) $(pgrep -x squid); do
+	[[ -w "/proc/$_p/oom_score_adj" ]] && echo -500 > "/proc/$_p/oom_score_adj" 2>/dev/null
+done
+SVC_WATCH_EOF
+  fi
+
+  # Register logrotate config for stunnel / sshplus logs (idempotent).
+  if [[ ! -f /etc/logrotate.d/sshplus ]]; then
+    cat >/etc/logrotate.d/sshplus <<'LOGROTATE_EOF'
+/var/log/stunnel4/*.log {
+	daily
+	rotate 7
+	maxsize 50M
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+	su stunnel4 stunnel4
+}
+/var/log/sshplus/*.log {
+	daily
+	rotate 7
+	maxsize 20M
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+}
+LOGROTATE_EOF
+    mkdir -p /var/log/sshplus
+  fi
+
+  # Add conntrack + overcommit_memory to sysctl drop-in if missing.
+  if [[ -f /etc/sysctl.d/99-sshplus.conf ]] && ! grep -q 'nf_conntrack_max' /etc/sysctl.d/99-sshplus.conf; then
+    cat >>/etc/sysctl.d/99-sshplus.conf <<'CONNTRACK_EOF'
+
+# --- Connection tracking (added by attscript upgrade) ---
+net.netfilter.nf_conntrack_max = 1048576
+net.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 86400
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
+net.netfilter.nf_conntrack_buckets = 262144
+vm.overcommit_memory = 1
+CONNTRACK_EOF
+    modprobe nf_conntrack 2>/dev/null
+    echo 262144 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+    sysctl --system >/dev/null 2>&1 || true
+  fi
+
+  # Register the daily proxy-restart cron entry that prevents long-term
+  # memory creep in the Python proxies.
+  if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
+    (crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
   fi
 
   [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1
