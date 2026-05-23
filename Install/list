@@ -36,13 +36,13 @@ echo "PasswordAuthentication yes" >>/etc/ssh/sshd_config
 _dir1='/bin'
 _dir2='/etc/SSHPlus'
 rm $_dir2/ShellBot.sh $_dir2/cabecalho $_dir2/open.py $_dir2/proxy.py $_dir2/wsproxy.py $_dir2/sniproxy.py >/dev/null 2>&1
-_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "badvpn" "userbackup" "instsqd" "blockt" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "sniproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh" "domaincheck")
+_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "badvpn" "userbackup" "instsqd" "blockt" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh" "domaincheck")
 for _arq in ${_mdls[@]}; do
 	[[ -e $_dir1/$_arq ]] && rm $_dir1/$_arq >/dev/null 2>&1
 	wget -c -P $_dir1 https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/$_arq
 	chmod +x $_dir1/$_arq
 done
-mv $_dir1/cabecalho $_dir1/bot $_dir1/open.py $_dir1/proxy.py $_dir1/wsproxy.py $_dir1/sniproxy.py $_dir2
+mv $_dir1/cabecalho $_dir1/bot $_dir1/open.py $_dir1/proxy.py $_dir1/wsproxy.py $_dir2
 _arq_host="/etc/hosts"
 _host[0]="d1n212ccp6ldpw.cloudfront.net"
 _host[1]="dns.whatsapp.net"
@@ -159,17 +159,37 @@ net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 net.ipv4.icmp_echo_ignore_broadcasts = 1
 
+# --- Connection tracking (prevents 'nf_conntrack: table full' under
+# load, which silently drops new flows and looks like a tunnel
+# outage). Sized for a multi-thousand-user tunneling box. ---
+net.netfilter.nf_conntrack_max = 1048576
+net.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 86400
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
+net.netfilter.nf_conntrack_buckets = 262144
+
 # --- Filesystem & memory ---
 fs.file-max = 2097152
 fs.nr_open = 2097152
 vm.swappiness = 10
 vm.dirty_ratio = 10
 vm.dirty_background_ratio = 5
+vm.overcommit_memory = 1
 
 # --- Auto-reboot on kernel panic to avoid stuck VPS ---
 kernel.panic = 10
 kernel.panic_on_oops = 1
 SYSCTL_EOF
+
+# nf_conntrack module must be loaded before its sysctls work — and
+# the hashsize is only settable as a module parameter, not via sysctl
+# on most kernels.
+modprobe nf_conntrack 2>/dev/null
+echo 262144 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+grep -qx nf_conntrack /etc/modules-load.d/sshplus-conntrack.conf 2>/dev/null || \
+	echo nf_conntrack > /etc/modules-load.d/sshplus-conntrack.conf
 
 # Apply the new tunables (and reload anything in /etc/sysctl.d)
 sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-sshplus.conf >/dev/null 2>&1
@@ -425,78 +445,24 @@ else
 	fi
 fi
 
-# Loop Squid CONNECTs back to the local SSH tunnel listeners.
+# Squid CONNECT loopback (disabled).
 #
-# When a mobile injector sends "CONNECT bug-host:443" to Squid, Squid
-# resolves bug-host (e.g. paysecure.islamicbank.ps,
-# easternbank.ap.gateway.mastercard.com, oauth2.gbp.ma,
-# three-cust-imgs.hcaptcha.com, ...) to its real public IP and opens
-# a TCP socket to that real server. The injector then completes a
-# TLS handshake with the real bug-host, which obviously does not
-# speak SSH, so the tunnel never reaches the user's SSH backend even
-# though Squid says "200 Connection established". This is the actual
-# reason "works on the IP, fails on the domain" survived every fix
-# that only touched sniproxy / Squid ACLs: the issue isn't the cert
-# or the ACL, it's that Squid was leaving the box.
-#
-# Fix: an iptables OUTPUT-chain DNAT scoped to the squid user that
-# rewrites every outbound TCP destination from Squid on common
-# HTTP/TLS ports (80, 443, 8080, 8443, 8880, 8888) to 127.0.0.1 on
-# the same port. The local sniproxy on 443 (or wsproxy on 80 / 8080
-# / 8880 / 8888) then handles the handshake — sniproxy issues a leaf
-# cert that matches whatever SNI the client sent — and tunnels the
-# inner stream to SSH. The rule is owner-scoped so nothing else on
-# the box is affected, and idempotent so /etc/autostart can re-run
-# it every minute.
-cat > /etc/Plus-loopback <<'LOOPBACK_EOF'
-#!/bin/bash
-set +e
-
-CHAIN=SSHPLUS_LOOPBACK
-TARGET_PORTS=(80 443 8080 8443 8880 8888)
-
-# Find which user squid runs as. Debian: proxy. RHEL/CentOS: squid.
-SQUID_USER=""
-for _u in proxy squid; do
-	if id -u "$_u" >/dev/null 2>&1; then
-		SQUID_USER="$_u"
-		# Prefer the user that's actually running squid right now.
-		if pgrep -u "$_u" -x squid >/dev/null 2>&1; then
-			break
-		fi
-	fi
-done
-[[ -z "$SQUID_USER" ]] && exit 0
-
-command -v iptables >/dev/null 2>&1 || exit 0
-
-# Quietly load NAT modules in case the kernel didn't auto-load them.
-modprobe iptable_nat 2>/dev/null
-modprobe nf_nat 2>/dev/null
-
-# Fast path: if the chain exists and is already hooked, exit.
-if iptables -t nat -nL "$CHAIN" >/dev/null 2>&1 && \
-   iptables -t nat -C OUTPUT -j "$CHAIN" 2>/dev/null; then
-	exit 0
+# Previous installs added an iptables NAT loopback to redirect Squid's
+# outbound CONNECTs to the local sniproxy. Now that SSL TUNNEL is back
+# on stunnel4 with a static cert, this rewrite is no longer needed and
+# would actually interfere — Squid talks to the real bug-host directly
+# as upstream operators expect.
+# Remove any leftover SSHPLUS_LOOPBACK chain from older installs.
+if command -v iptables >/dev/null 2>&1; then
+	iptables -t nat -D OUTPUT -j SSHPLUS_LOOPBACK 2>/dev/null
+	iptables -t nat -F SSHPLUS_LOOPBACK 2>/dev/null
+	iptables -t nat -X SSHPLUS_LOOPBACK 2>/dev/null
 fi
+rm -f /etc/Plus-loopback
+sed -i '/Plus-loopback/d' /etc/autostart 2>/dev/null
 
-# (Re)create the chain so re-runs never accumulate duplicates.
-if iptables -t nat -nL "$CHAIN" >/dev/null 2>&1; then
-	iptables -t nat -F "$CHAIN"
-else
-	iptables -t nat -N "$CHAIN"
-fi
-
-# Never NAT loopback-bound traffic — prevents recursive loops if
-# squid ever talks to itself.
-iptables -t nat -A "$CHAIN" -d 127.0.0.0/8 -j RETURN
-
-# Redirect every TCP packet squid emits toward common HTTP / TLS
-# tunnel ports back to the local listener on the same port. The
-# DNAT only affects packets owned by the squid user.
-for P in "${TARGET_PORTS[@]}"; do
-	iptables -t nat -A "$CHAIN" -m owner --uid-owner "$SQUID_USER" \
-		-p tcp --dport "$P" -j DNAT --to-destination "127.0.0.1:$P"
+if false; then
+	: <<'LOOPBACK_EOF'
 done
 
 # Hook the chain into OUTPUT exactly once.
@@ -505,19 +471,8 @@ iptables -t nat -C OUTPUT -j "$CHAIN" 2>/dev/null || \
 
 exit 0
 LOOPBACK_EOF
-chmod +x /etc/Plus-loopback
-bash /etc/Plus-loopback >/dev/null 2>&1
-
-if ! grep -q "/etc/Plus-loopback" /etc/autostart 2>/dev/null; then
-	echo "[[ -e /etc/Plus-loopback ]] && bash /etc/Plus-loopback >/dev/null 2>&1" >> /etc/autostart
 fi
-
-if iptables -t nat -nL SSHPLUS_LOOPBACK >/dev/null 2>&1 \
-   && iptables -t nat -C OUTPUT -j SSHPLUS_LOOPBACK 2>/dev/null; then
-	echo -e "\033[1;32m   ✓ Squid CONNECT bug-host loops back to local SSL TUNNEL\033[0m"
-else
-	echo -e "\033[1;33m   ⚠ Could not install iptables NAT loopback (no nat table?)\033[0m"
-fi
+echo -e "\033[1;32m   ✓ Squid CONNECT loopback disabled (using stunnel4 SSL TUNNEL)\033[0m"
 
 # 3. Install Dropbear on ports 110 and 143
 echo -e "\033[1;33m[3/8] Installing Dropbear (ports 110, 143)...\033[0m"
@@ -531,82 +486,99 @@ service dropbear start >/dev/null 2>&1
 [[ $(grep -c "/bin/false" /etc/shells) = '0' ]] && echo "/bin/false" >>/etc/shells
 echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143\033[0m"
 
-# 4. Install SSL TUNNEL on port 443. The listener is sniproxy.py — a
-# Python TLS terminator that issues a fresh self-signed leaf cert for
-# whatever SNI hostname the client sends, signed by a long-lived local
-# CA in /etc/stunnel/. Inside the TLS layer it forwards plaintext to a
-# payload multiplexer (wsproxy) bound to 127.0.0.1:700 so port 443
-# transparently accepts ALL three connection methods:
-#   - SSL/TLS (SNI)                  -> raw SSH inside TLS
-#   - Payload + SSL/TLS = WS SSL     -> WebSocket-style payload inside TLS
-#   - Payload + SSL/TLS + Proxy      -> HTTP CONNECT proxy inside TLS
-#
-# Why sniproxy instead of stunnel: stunnel serves one fixed cert, so
-# every new bug-host SNI (paysecure.islamicbank.ps,
-# *.gateway.mastercard.com, hcaptcha endpoints, ...) has to be added
-# to the cert SAN by hand or strict TLS clients/carrier middleboxes
-# reject the handshake. sniproxy reads the SNI from the ClientHello,
-# generates a leaf cert that matches it on the fly, and caches it on
-# disk for re-use — connecting via any domain "just works", including
-# the user's own domain, with zero per-host configuration.
-echo -e "\033[1;33m[4/8] Installing SSL TUNNEL (port 443, dynamic SNI)...\033[0m"
+# 4. Install SSL TUNNEL on port 443 using stunnel4 with a self-signed cert.
+echo -e "\033[1;33m[4/8] Installing SSL TUNNEL (port 443, stunnel4)...\033[0m"
 
-# Pre-flight: ensure port 443 is free before installing the listener
+# Free port 443 if apache2/nginx is squatting on it before stunnel binds.
 if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
 	holder=$(ss -tlnpH 2>/dev/null | awk '$4 ~ /(^|:)443$/ {print $NF; exit}')
-	echo -e "\033[1;31m   ✗ Port 443 already in use${holder:+ by $holder}. Skipping SSL TUNNEL install.\033[0m"
-	echo -e "\033[1;33m     Free port 443 (e.g. stop apache2/nginx) and re-run this step.\033[0m"
-else
-	command -v python3 >/dev/null 2>&1 || apt-get install python3 -y >/dev/null 2>&1
-	command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
-	mkdir -p /etc/stunnel
-	cd /etc/stunnel/
+	if echo "$holder" | grep -qE 'apache2|httpd'; then
+		sed -i 's/^[[:space:]]*Listen[[:space:]]\+443[[:space:]]*$/Listen 8443/g' /etc/apache2/ports.conf 2>/dev/null
+		sed -i 's/<VirtualHost[[:space:]]\+\*:443>/<VirtualHost *:8443>/g' /etc/apache2/sites-enabled/*.conf 2>/dev/null
+		service apache2 restart >/dev/null 2>&1
+		sleep 1
+	elif echo "$holder" | grep -qE 'nginx'; then
+		echo -e "\033[1;33m   ⚠ nginx is on port 443. Disable its 443 server block manually then re-run install.\033[0m"
+	fi
+fi
 
-	# Disable any pre-existing stunnel4 service so it can never race
-	# sniproxy for port 443. Leaving the package installed is fine —
-	# sniproxy doesn't use it.
-	service stunnel4 stop >/dev/null 2>&1
-	systemctl disable stunnel4 >/dev/null 2>&1
-	if [[ -f /etc/default/stunnel4 ]]; then
-		sed -i 's/^[# ]*ENABLED=.*/ENABLED=0/' /etc/default/stunnel4
+if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
+	holder=$(ss -tlnpH 2>/dev/null | awk '$4 ~ /(^|:)443$/ {print $NF; exit}')
+	echo -e "\033[1;31m   ✗ Port 443 still in use${holder:+ by $holder}. Skipping SSL TUNNEL install.\033[0m"
+else
+	command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
+	apt-get install -y stunnel4 >/dev/null 2>&1
+	mkdir -p /etc/stunnel /var/run/stunnel4 /var/log/stunnel4
+	chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
+	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'
+; SSHPlus SSL TUNNEL — stable configuration.
+; The keep-alive sockets and long idle timeout prevent carrier NATs and
+; mobile firewalls from killing an idle SSH session inside the tunnel.
+
+pid = /var/run/stunnel4/stunnel.pid
+output = /var/log/stunnel4/stunnel.log
+debug = 4
+syslog = no
+
+cert = /etc/stunnel/stunnel.pem
+client = no
+
+socket = a:SO_REUSEADDR=1
+socket = a:SO_KEEPALIVE=1
+socket = a:TCP_KEEPIDLE=60
+socket = a:TCP_KEEPINTVL=15
+socket = a:TCP_KEEPCNT=4
+socket = l:TCP_NODELAY=1
+socket = l:SO_KEEPALIVE=1
+socket = r:TCP_NODELAY=1
+socket = r:SO_KEEPALIVE=1
+
+TIMEOUTbusy = 300
+TIMEOUTclose = 0
+TIMEOUTconnect = 30
+TIMEOUTidle = 86400
+
+[stunnel]
+connect = 127.0.0.1:22
+accept = 443
+STUNNEL_CONF
+	if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
+		openssl genrsa -out /tmp/key.pem 2048 >/dev/null 2>&1
+		openssl req -new -x509 -key /tmp/key.pem -out /tmp/cert.pem -days 3650 -subj "/C=US/ST=NA/L=NA/O=SSHPlus/OU=SSHPlus/CN=sshplus.local" >/dev/null 2>&1
+		cat /tmp/cert.pem /tmp/key.pem >/etc/stunnel/stunnel.pem
+		chown stunnel4:stunnel4 /etc/stunnel/stunnel.pem 2>/dev/null
+		chmod 600 /etc/stunnel/stunnel.pem
+		rm -f /tmp/cert.pem /tmp/key.pem
+	fi
+	[[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+	systemctl enable stunnel4 >/dev/null 2>&1
+	systemctl daemon-reload >/dev/null 2>&1
+	service stunnel4 restart >/dev/null 2>&1
+
+	# Watchdog: cron's /etc/autostart runs every minute. If stunnel4 is
+	# not bound to its accept port, restart it. Idempotent — only added
+	# once.
+	if ! grep -q '# SSHPLUS_STUNNEL_WATCHDOG' /etc/autostart 2>/dev/null; then
+		cat >>/etc/autostart <<'WATCH_EOF'
+# SSHPLUS_STUNNEL_WATCHDOG
+if [[ -f /etc/stunnel/stunnel.conf ]]; then
+	_acc=$(grep -E '^[[:space:]]*accept[[:space:]]*=' /etc/stunnel/stunnel.conf | awk -F'=' '{gsub(/[[:space:]]/,"",$2); print $2}' | awk -F: '{print $NF}')
+	for _p in $_acc; do
+		if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${_p}\$"; then
+			service stunnel4 restart >/dev/null 2>&1
+			break
+		fi
+	done
+fi
+WATCH_EOF
 	fi
 
-	# sniproxy.py creates the CA, the default leaf cert and the cache
-	# directory the first time it runs. Bootstrap them up front so the
-	# first incoming connection doesn't pay the openssl-fork cost
-	# in-band.
-	python3 - <<-'PY' >/dev/null 2>&1
-	import sys
-	sys.path.insert(0, '/etc/SSHPlus')
-	import sniproxy
-	sniproxy.ensure_ca()
-	sniproxy.ensure_default_leaf()
-	PY
-
-	if [[ ! -s /etc/stunnel/sniproxy_ca.crt ]] || [[ ! -s /etc/stunnel/sniproxy_default.crt ]]; then
-		echo -e "\033[1;31m   ✗ Failed to bootstrap dynamic SNI CA. SSL TUNNEL not started.\033[0m"
-		cd $HOME
+	sleep 1
+	if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
+		echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (stunnel4 -> 127.0.0.1:22)\033[0m"
+		echo -e "\033[1;36m     Keep-alive + 24h idle timeout enabled; watchdog runs every minute.\033[0m"
 	else
-		# Start the local-only payload multiplexer (wsproxy) on 127.0.0.1:700 -> SSH:22
-		if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-			screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1 >/dev/null 2>&1
-			echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1" >>/etc/autostart
-		fi
-
-		# Start the dynamic-SNI TLS listener on 0.0.0.0:443 -> 127.0.0.1:700
-		screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700 >/dev/null 2>&1
-		echo -e "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)443\$' || screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700" >>/etc/autostart
-		cd $HOME
-
-		sleep 1
-		if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
-			echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (dynamic SNI)\033[0m"
-			echo -e "\033[1;36m     The TLS cert is generated on the fly to match whatever\033[0m"
-			echo -e "\033[1;36m     SNI the client sends, including any bug-host SNI used\033[0m"
-			echo -e "\033[1;36m     to bypass carrier billing — no per-host configuration.\033[0m"
-		else
-			echo -e "\033[1;31m   ✗ sniproxy did not bind port 443. Check 'screen -r sniproxy_443'.\033[0m"
-		fi
+		echo -e "\033[1;31m   ✗ stunnel4 did not bind port 443. Check 'service stunnel4 status'.\033[0m"
 	fi
 fi
 
@@ -771,6 +743,74 @@ if iptables -nL BLOCK_TORRENT >/dev/null 2>&1; then
 	echo -e "\033[1;32m   ✓ BLOCK TORRENT enabled (BLOCK_TORRENT chain → FORWARD)\033[0m"
 else
 	echo -e "\033[1;31m   ✗ BLOCK TORRENT chain creation failed.\033[0m"
+fi
+
+# 9. Log rotation. Stunnel/python proxies write to flat files that
+# would otherwise grow unbounded and fill /var, which silently kills
+# every tunneling service on the box.
+cat >/etc/logrotate.d/sshplus <<'LOGROTATE_EOF'
+/var/log/stunnel4/*.log {
+	daily
+	rotate 7
+	maxsize 50M
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+	su stunnel4 stunnel4
+}
+/var/log/sshplus/*.log {
+	daily
+	rotate 7
+	maxsize 20M
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+}
+LOGROTATE_EOF
+mkdir -p /var/log/sshplus
+
+# 10. Unified service watchdog. Cron runs /etc/autostart every minute;
+# this block re-checks every long-lived tunneling service and revives
+# whatever has died. Each service is gated so the watchdog only acts
+# on services that were actually installed.
+if ! grep -q '# SSHPLUS_SERVICE_WATCHDOG' /etc/autostart 2>/dev/null; then
+	cat >>/etc/autostart <<'SVC_WATCH_EOF'
+# SSHPLUS_SERVICE_WATCHDOG
+# Auto-revive any installed tunneling service that fell over.
+_sshplus_watch() {
+	local _svc="$1" _check="$2"
+	systemctl list-unit-files 2>/dev/null | grep -qw "${_svc}.service" || return 0
+	if ! eval "$_check" >/dev/null 2>&1; then
+		systemctl restart "$_svc" >/dev/null 2>&1 || service "$_svc" restart >/dev/null 2>&1
+	fi
+}
+_sshplus_watch ssh       'pgrep -x sshd'
+_sshplus_watch dropbear  'pgrep -x dropbear'
+[[ -f /etc/stunnel/stunnel.conf ]] && _sshplus_watch stunnel4 'pgrep -x stunnel4'
+[[ -f /etc/openvpn/server.conf ]]  && _sshplus_watch openvpn  'pgrep -x openvpn'
+[[ -f /etc/squid/squid.conf ]]     && _sshplus_watch squid    'pgrep -x squid'
+[[ -f /etc/squid3/squid.conf ]]    && _sshplus_watch squid3   'pgrep -x squid'
+unset -f _sshplus_watch
+
+# Lower OOM-kill priority for tunneling daemons so the kernel kills
+# misbehaving user shells first under memory pressure.
+for _p in $(pgrep -x sshd) $(pgrep -x dropbear) $(pgrep -x stunnel4) \
+          $(pgrep -x openvpn) $(pgrep -x squid); do
+	[[ -w "/proc/$_p/oom_score_adj" ]] && echo -500 > "/proc/$_p/oom_score_adj" 2>/dev/null
+done
+SVC_WATCH_EOF
+fi
+
+# 11. Daily restart of Python proxies — these are long-running screen
+# sessions whose memory footprint creeps up over weeks. A 04:00 restart
+# is invisible to active sessions (SSH reconnects in <1s) and prevents
+# the slow leak from ever mattering.
+if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
+	(crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
 fi
 
 echo ""

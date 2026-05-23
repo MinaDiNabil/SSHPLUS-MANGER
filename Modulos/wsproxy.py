@@ -6,42 +6,26 @@ import select
 import sys
 import time
 import getopt
-import hashlib
-import base64
 
 PASS = ''
+LISTENING_ADDR = '0.0.0.0'
 try:
     LISTENING_PORT = int(sys.argv[1])
 except (IndexError, ValueError):
     LISTENING_PORT = 80
+# Optional second positional argument is the backend SSH port. Defaults
+# to 22 to match the original SSHPLUS behaviour.
 try:
     SSH_PORT = int(sys.argv[2])
 except (IndexError, ValueError):
     SSH_PORT = 22
-# Optional third positional argument selects the bind address. Default
-# stays 0.0.0.0 for backward compatibility with public WebSocket
-# listeners; SSL-tunnel multiplexers should pass 127.0.0.1 so the
-# decrypted SSH backend is never reachable from outside.
-try:
-    LISTENING_ADDR = sys.argv[3]
-except IndexError:
-    LISTENING_ADDR = '0.0.0.0'
 BUFLEN = 4096 * 4
 TIMEOUT = 60
 MSG = ''
 COR = '<font color="null">'
 FTAG = '</font>'
 DEFAULT_HOST = "127.0.0.1:" + str(SSH_PORT)
-RESPONSE_WS = "HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n"
-RESPONSE_PROXY = "HTTP/1.1 200 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n"
-
-HTTP_METHODS = (b'GET', b'POST', b'HEAD', b'PUT', b'OPTIONS', b'DELETE', b'PATCH', b'CONNECT')
-WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
-
-
-def ws_accept(key):
-    digest = hashlib.sha1((key + WS_GUID).encode('ascii')).digest()
-    return base64.b64encode(digest).decode('ascii')
+RESPONSE = ("HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n").encode('utf-8')
 
 
 class Server(threading.Thread):
@@ -57,9 +41,10 @@ class Server(threading.Thread):
     def run(self):
         self.soc = socket.socket(socket.AF_INET)
         self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         self.soc.settimeout(2)
         self.soc.bind((self.host, self.port))
-        self.soc.listen(0)
+        self.soc.listen(128)
         self.running = True
 
         try:
@@ -67,10 +52,18 @@ class Server(threading.Thread):
                 try:
                     c, addr = self.soc.accept()
                     c.setblocking(1)
+                    c.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    try:
+                        c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except (AttributeError, OSError):
+                        pass
                 except socket.timeout:
+                    continue
+                except OSError:
                     continue
 
                 conn = ConnectionHandler(c, self, addr)
+                conn.daemon = True
                 conn.start()
                 self.addConn(conn)
         finally:
@@ -78,8 +71,9 @@ class Server(threading.Thread):
             self.soc.close()
 
     def printLog(self, log):
-        with self.logLock:
-            print(log)
+        self.logLock.acquire()
+        print(log)
+        self.logLock.release()
 
     def addConn(self, conn):
         try:
@@ -117,6 +111,7 @@ class ConnectionHandler(threading.Thread):
         self.client_buffer = ''
         self.server = server
         self.log = 'Connection: ' + str(addr)
+        self.method = ''
 
     def close(self):
         try:
@@ -137,107 +132,34 @@ class ConnectionHandler(threading.Thread):
         finally:
             self.targetClosed = True
 
-    def _classify(self, raw):
-        # Returns one of: 'raw', 'connect', 'ws'
-        # 'raw'     -> non-HTTP (e.g. SSH greeting "SSH-2.0-...") tunnel as-is
-        # 'connect' -> standard HTTP CONNECT proxy ("CONNECT host:port HTTP/1.1")
-        # 'ws'      -> any other HTTP request (treated as WebSocket-style payload)
-        if not raw:
-            return 'raw'
-        head = raw.split(b'\r\n', 1)[0]
-        parts = head.split(b' ')
-        if len(parts) < 3 or not parts[-1].startswith(b'HTTP/'):
-            return 'raw'
-        if parts[0].upper() not in HTTP_METHODS:
-            return 'raw'
-        if parts[0].upper() == b'CONNECT':
-            return 'connect'
-        return 'ws'
-
     def run(self):
         try:
-            # Server-speaks-first protocols (raw SSH over SSL/TLS): the client
-            # waits for the SSH banner before sending anything, so a blocking
-            # recv here would deadlock until kexTimeout. Use a short read window
-            # to detect that case and connect to the backend immediately.
-            # 2 s is well below KEX timeout but tolerant of slow mobile networks
-            # whose first packet may not arrive within 500 ms.
-            self.client.settimeout(2.0)
-            try:
-                raw = self.client.recv(BUFLEN)
-            except socket.timeout:
-                raw = b''
-            finally:
-                self.client.settimeout(None)
-            kind = self._classify(raw)
+            self.client_buffer = self.client.recv(BUFLEN).decode('utf-8', errors='replace')
 
-            if kind == 'raw':
-                # Non-HTTP payload (raw SSH inside SSL/TLS tunnel, etc.) or
-                # no payload yet (client waiting for server banner).
-                # Forward unmodified to the default backend without sending any HTTP response.
-                self.method = 'RAW'
-                self.log += ' - RAW ' + DEFAULT_HOST
-                self.connect_target(DEFAULT_HOST)
-                if raw:
-                    try:
-                        self.target.sendall(raw)
-                    except Exception:
-                        pass
-                self.client_buffer = ''
-                self.server.printLog(self.log)
-                self.doCONNECT()
-                return
-
-            try:
-                self.client_buffer = raw.decode('utf-8', errors='ignore')
-            except Exception:
-                self.client_buffer = ''
-
-            if kind == 'connect':
-                # Standard HTTP CONNECT proxy (Payload + SSL/TLS + Proxy = WS Proxy)
-                head = self.client_buffer.split('\r\n', 1)[0]
-                target = head.split(' ')[1] if ' ' in head else DEFAULT_HOST
-                # Optional auth via X-Pass header
-                passwd = self.findHeader(self.client_buffer, 'X-Pass')
-                if len(PASS) != 0 and passwd != PASS:
-                    self.client.send(b'HTTP/1.1 407 Proxy Authentication Required\r\n\r\n')
-                    return
-                # Restrict to localhost backends to avoid open-proxy abuse
-                host_only = target.split(':', 1)[0]
-                if host_only not in ('127.0.0.1', 'localhost', LISTENING_ADDR):
-                    target = DEFAULT_HOST
-                self.method = 'CONNECT'
-                self.log += ' - CONNECT ' + target
-                self.connect_target(target)
-                self.client.sendall(RESPONSE_PROXY.encode('utf-8'))
-                self.client_buffer = ''
-                self.server.printLog(self.log)
-                self.doCONNECT()
-                return
-
-            # kind == 'ws' -> Payload + SSL/TLS = WS SSL (and plain WebSocket payloads)
             hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
+
             if hostPort == '':
                 hostPort = DEFAULT_HOST
 
             split = self.findHeader(self.client_buffer, 'X-Split')
+
             if split != '':
                 self.client.recv(BUFLEN)
 
-            passwd = self.findHeader(self.client_buffer, 'X-Pass')
-            if len(PASS) != 0 and passwd == PASS:
-                self.method_CONNECT(hostPort)
-            elif len(PASS) != 0 and passwd != PASS:
-                self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
+            if hostPort != '':
+                passwd = self.findHeader(self.client_buffer, 'X-Pass')
+
+                if len(PASS) != 0 and passwd == PASS:
+                    self.method_CONNECT(hostPort)
+                elif len(PASS) != 0 and passwd != PASS:
+                    self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
+                elif hostPort.startswith('127.0.0.1') or hostPort.startswith('localhost'):
+                    self.method_CONNECT(hostPort)
+                else:
+                    self.client.send(b'HTTP/1.1 403 Forbidden!\r\n\r\n')
             else:
-                # Mirror the CONNECT branch: don't reject non-local hosts
-                # (mobile injectors routinely send the server's public IP
-                # or domain). Just transparently rewrite the target so the
-                # proxy still cannot be abused as an open relay.
-                host_only = hostPort.split(':', 1)[0]
-                if host_only not in ('127.0.0.1', 'localhost', LISTENING_ADDR):
-                    hostPort = DEFAULT_HOST
-                self.method_CONNECT(hostPort)
+                print('- No X-Real-Host!')
+                self.client.send(b'HTTP/1.1 400 NoXRealHost!\r\n\r\n')
 
         except Exception as e:
             self.log += ' - error: ' + str(e)
@@ -247,16 +169,19 @@ class ConnectionHandler(threading.Thread):
             self.server.removeConn(self)
 
     def findHeader(self, head, header):
-        # Case-insensitive header lookup, tolerant of any whitespace
-        # between the colon and the value (real-world injectors lowercase
-        # header names and sometimes drop the space after the colon).
-        for line in head.split('\r\n'):
-            if ':' not in line:
-                continue
-            name, _, value = line.partition(':')
-            if name.strip().lower() == header.lower():
-                return value.strip()
-        return ''
+        aux = head.find(header + ': ')
+
+        if aux == -1:
+            return ''
+
+        aux = head.find(':', aux)
+        head = head[aux + 2:]
+        aux = head.find('\r\n')
+
+        if aux == -1:
+            return ''
+
+        return head[:aux]
 
     def connect_target(self, host):
         i = host.find(':')
@@ -264,7 +189,7 @@ class ConnectionHandler(threading.Thread):
             port = int(host[i + 1:])
             host = host[:i]
         else:
-            if getattr(self, 'method', '') == 'CONNECT':
+            if self.method == 'CONNECT':
                 port = 443
             else:
                 port = 80
@@ -272,34 +197,20 @@ class ConnectionHandler(threading.Thread):
         (soc_family, soc_type, proto, _, address) = socket.getaddrinfo(host, port)[0]
 
         self.target = socket.socket(soc_family, soc_type, proto)
+        self.target.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        try:
+            self.target.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except (AttributeError, OSError):
+            pass
         self.targetClosed = False
         self.target.connect(address)
 
-    def _ws_handshake_response(self):
-        # If the client sent a real RFC 6455 handshake we must echo back a
-        # valid Sec-WebSocket-Accept; otherwise (mobile tunneling apps that
-        # only fake the upgrade) keep the legacy short 101 reply.
-        ws_key = self.findHeader(self.client_buffer, 'Sec-WebSocket-Key')
-        if ws_key:
-            ws_proto = self.findHeader(self.client_buffer, 'Sec-WebSocket-Protocol')
-            lines = [
-                'HTTP/1.1 101 Switching Protocols',
-                'Upgrade: websocket',
-                'Connection: Upgrade',
-                'Sec-WebSocket-Accept: ' + ws_accept(ws_key),
-            ]
-            if ws_proto:
-                # Echo the first offered subprotocol to satisfy strict clients
-                lines.append('Sec-WebSocket-Protocol: ' + ws_proto.split(',')[0].strip())
-            return ('\r\n'.join(lines) + '\r\n\r\n').encode('utf-8')
-        return RESPONSE_WS.encode('utf-8')
-
     def method_CONNECT(self, path):
         self.method = 'CONNECT'
-        self.log += ' - WS ' + path
+        self.log += ' - CONNECT ' + path
 
         self.connect_target(path)
-        self.client.sendall(self._ws_handshake_response())
+        self.client.sendall(RESPONSE)
         self.client_buffer = ''
 
         self.server.printLog(self.log)
@@ -364,10 +275,10 @@ def parse_args(argv):
 
 
 def main(host=LISTENING_ADDR, port=LISTENING_PORT):
-    print("\033[0;34m━" * 8, "\033[1;32m PROXY WEBSOCKET", "\033[0;34m━" * 8, "\n")
+    print("\033[0;34m" + "━" * 8 + " \033[1;32mPROXY WEBSOCKET\033[0;34m " + "━" * 8 + "\n")
     print("\033[1;33mIP:\033[1;32m " + LISTENING_ADDR)
     print("\033[1;33mPORTA:\033[1;32m " + str(LISTENING_PORT) + "\n")
-    print("\033[0;34m━" * 10, "\033[1;32m VPSMANAGER", "\033[0;34m━\033[1;37m" * 11, "\n")
+    print("\033[0;34m" + "━" * 10 + " \033[1;32mVPSMANAGER\033[0;34m " + "━\033[1;37m" * 11 + "\n")
 
     server = Server(LISTENING_ADDR, LISTENING_PORT)
     server.start()

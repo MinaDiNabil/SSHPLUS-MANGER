@@ -811,222 +811,53 @@ LOOPBACK_EOF
 		fi
 	}
 	inst_ssl() {
-		# SSL TUNNEL is implemented as a per-port pair of screen sessions:
-		#   sniproxy_PORT -> sniproxy.py PORT MUX  (dynamic-SNI TLS termination)
-		#   sslmux_PORT   -> wsproxy.py MUX SSH 127.0.0.1  (payload demux)
-		# sniproxy.py issues a fresh self-signed leaf cert per SNI on the
-		# fly, so the cert *always* matches whatever hostname the client
-		# puts in the ClientHello. This is what fixes "works on the IP,
-		# fails on the domain": no per-host SAN list to maintain, no
-		# stale cert to regenerate — every domain (the user's own and
-		# every bug-host SNI like paysecure.islamicbank.ps,
-		# *.gateway.mastercard.com, hcaptcha endpoints, ...) just works.
-		local _has_sniproxy=0 _has_stunnel=0
-		screen -ls 2>/dev/null | grep -q '\.sniproxy_' && _has_sniproxy=1
-		netstat -nltp 2>/dev/null | grep -q 'stunnel4' && _has_stunnel=1
-
-		sniproxy_bootstrap() {
-			# Idempotent: cheap when the CA + default leaf already exist.
-			command -v python3 >/dev/null 2>&1 || apt-get install python3 -y >/dev/null 2>&1
-			command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
-			mkdir -p /etc/stunnel
-			python3 - <<'PY' >/dev/null 2>&1
-import sys
-sys.path.insert(0, '/etc/SSHPlus')
-import sniproxy
-sniproxy.ensure_ca()
-sniproxy.ensure_default_leaf()
-PY
-		}
-
-		sniproxy_listed_ports() {
-			# Aggregate accept ports from screen sessions and from any
-			# leftover stunnel4 listeners (legacy installs being migrated).
-			{
-				screen -ls 2>/dev/null | awk '
-					/\.sniproxy_/{
-						split($1, a, "."); split(a[2], b, "_"); print b[2]
-					}'
-				netstat -nplt 2>/dev/null | awk '/stunnel4/{
-					split($4, p, ":"); print p[length(p)]
-				}'
-			} | awk 'NF' | sort -nu
-		}
-
-		sniproxy_pick_mux() {
-			local _port=$1 _mux
-			_mux=$((_port + 10000))
-			(( _mux > 65535 )) && _mux=$((10000 + (_port % 5000)))
-			while ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${_mux}\$"; do
-				_mux=$((_mux + 1))
-				(( _mux > 65535 )) && _mux=10000
-			done
-			echo $_mux
-		}
-
-		sniproxy_spawn_pair() {
-			# Start (or restart) the listener+mux pair for accept port $1
-			# forwarding to ssh/dropbear port $2. Idempotent in /etc/autostart.
-			local _accept=$1 _backend=$2 _mux
-			_mux=$(sniproxy_pick_mux "$_accept")
-			screen -S sslmux_${_accept} -X quit 2>/dev/null
-			screen -S sniproxy_${_accept} -X quit 2>/dev/null
-			screen -dmS sslmux_${_accept} python3 /etc/SSHPlus/wsproxy.py $_mux $_backend 127.0.0.1
-			screen -dmS sniproxy_${_accept} python3 /etc/SSHPlus/sniproxy.py $_accept $_mux
-			sed -i "/sslmux_${_accept} python3/d" /etc/autostart 2>/dev/null
-			sed -i "/sniproxy.py ${_accept} /d" /etc/autostart 2>/dev/null
-			echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${_mux}\$' || screen -dmS sslmux_${_accept} python3 /etc/SSHPlus/wsproxy.py $_mux $_backend 127.0.0.1" >>/etc/autostart
-			echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)${_accept}\$' || screen -dmS sniproxy_${_accept} python3 /etc/SSHPlus/sniproxy.py $_accept $_mux" >>/etc/autostart
-		}
-
-		sniproxy_drop_pair() {
-			# Stop and forget a listener+mux pair for accept port $1.
-			local _accept=$1 _section
-			screen -S sniproxy_${_accept} -X quit 2>/dev/null
-			screen -S sslmux_${_accept} -X quit 2>/dev/null
-			sed -i "/sniproxy.py ${_accept} /d" /etc/autostart 2>/dev/null
-			sed -i "/sslmux_${_accept} python3/d" /etc/autostart 2>/dev/null
-			# Best-effort sweep of the legacy stunnel.conf section.
-			if [[ -f /etc/stunnel/stunnel.conf ]]; then
-				_section=$(awk -v p="$_accept" '
-					/^\[/ { name=$0; sub(/^\[/, "", name); sub(/\].*/, "", name) }
-					$1=="accept" && $2=="=" && $3==p { print name; exit }
-				' /etc/stunnel/stunnel.conf)
-				[[ -n "$_section" ]] && sed -i "/^\[$_section\]/,/^$/d" /etc/stunnel/stunnel.conf
-			fi
-		}
-
-		sniproxy_migrate_stunnel() {
-			# Reuse the existing stunnel listener ports — the user already
-			# opened them in the firewall — and start a sniproxy pair for
-			# each. Then take stunnel down so port 443 (and any others)
-			# is owned by sniproxy on the next reboot too.
-			[[ -f /etc/stunnel/stunnel.conf ]] || return 0
-			local _accept _connect _backend
-			while read -r _accept _connect; do
-				[[ -z "$_accept" || -z "$_connect" ]] && continue
-				# `connect = 127.0.0.1:NNN` -> NNN is the existing wsproxy
-				# multiplexer port that already forwards to SSH. We keep
-				# using it instead of guessing a fresh mux port.
-				_backend=$(ss -tlnpH "sport = :${_connect##*:}" 2>/dev/null \
-					| grep -oP 'wsproxy\.py \K[0-9]+ [0-9]+' | awk '{print $2}' | head -1)
-				if [[ -z "$_backend" ]]; then
-					# Fallback: assume direct SSH:22 if we can't see the
-					# wsproxy command line (e.g. session died).
-					_backend=22
-				fi
-				sniproxy_spawn_pair "$_accept" "$_backend"
-			done < <(awk '
-				/^\[/ { acc=""; conn="" }
-				$1=="accept"  && $2=="=" { acc=$3 }
-				$1=="connect" && $2=="=" { conn=$3 }
-				acc != "" && conn != "" { print acc, conn; acc=""; conn="" }
-			' /etc/stunnel/stunnel.conf)
-			service stunnel4 stop >/dev/null 2>&1
-			systemctl disable stunnel4 >/dev/null 2>&1
-			[[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=0/' /etc/default/stunnel4
-			_has_sniproxy=1
-			_has_stunnel=0
-		}
-
-		if [[ $_has_sniproxy -eq 1 || $_has_stunnel -eq 1 ]]; then
-			if [[ $_has_stunnel -eq 1 && $_has_sniproxy -eq 0 ]]; then
-				echo -e "\033[1;33m  ⚙  Migrating SSL TUNNEL from static-cert stunnel to dynamic SNI...\033[0m"
-				sniproxy_bootstrap
-				sniproxy_migrate_stunnel
-				echo -e "\033[1;32m  ✓ Migration complete.\033[0m"
-				sleep 1
-			fi
-			sniproxy_bootstrap
-			local _ports
-			_ports=$(sniproxy_listed_ports | xargs)
-			[[ -z "$_ports" ]] && _ports="\033[1;31mUNAVAILABLE"
+		if netstat -nltp 2>/dev/null | grep -q 'stunnel4'; then
+			sslt=$(netstat -nplt 2>/dev/null | grep stunnel4 | awk '{print $4}' | awk -F ":" '{print $NF}' | xargs)
+			[[ -z "$sslt" ]] && sslt="\033[1;31mUNAVAILABLE"
 			clear
 			echo -e "\E[44;1;37m              MANAGE SSL TUNNEL               \E[0m"
-			echo -e "\n\033[1;33mPORTS\033[1;37m: \033[1;32m$_ports"
+			echo -e "\n\033[1;33mPORTS\033[1;37m: \033[1;32m$sslt"
 			echo ""
-			echo -e "\033[1;33mMODE \033[1;37m: \033[1;36mDynamic SNI \033[1;37m(cert auto-matches any hostname)"
-			echo ""
-			echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;37m• \033[1;33mADD PORT\033[0m"
-			echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;37m• \033[1;33mREMOVE PORT\033[0m"
-			echo -e "\033[1;31m[\033[1;36m3\033[1;31m] \033[1;37m• \033[1;33mREMOVE SSL TUNNEL\033[0m"
-			echo -e "\033[1;31m[\033[1;36m4\033[1;31m] \033[1;37m• \033[1;33mSHOW CA / DYNAMIC SNI INFO\033[0m"
+			echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;37m• \033[1;33mCHANGE SSL TUNNEL PORT\033[0m"
+			echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;37m• \033[1;33mREMOVE SSL TUNNEL\033[0m"
 			echo -e "\033[1;31m[\033[1;36m0\033[1;31m] \033[1;37m• \033[1;33mBACK\033[0m"
 			echo ""
 			echo -ne "\033[1;32mWHAT DO YOU WANT TO DO \033[1;33m?\033[1;37m "
 			read resposta
 			echo ""
 			[[ "$resposta" = '1' ]] && {
-				clear
-				echo -e "\E[44;1;37m         ADD PORT TO SSL TUNNEL         \E[0m\n"
-				echo -ne "\033[1;32mWHICH PORT DO YOU WANT TO ADD \033[1;33m?\033[1;37m "
+				echo -ne "\033[1;32mWHICH PORT DO YOU WANT TO USE \033[1;33m?\033[1;37m "
 				read porta
+				echo ""
 				[[ -z "$porta" ]] && {
-					echo -e "\n\033[1;31mInvalid port!"
+					echo -e "\033[1;31mInvalid port!"
 					sleep 2
-					inst_ssl
+					clear
+					fun_conexao
 				}
 				verif_ptrs $porta
+				echo -e "\033[1;32mCHANGING SSL TUNNEL PORT!"
+				var2=$(grep 'accept' /etc/stunnel/stunnel.conf | awk '{print $NF}')
+				sed -i "s/\b$var2\b/$porta/g" /etc/stunnel/stunnel.conf >/dev/null 2>&1
 				[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/tcp >/dev/null 2>&1
-				ssh_ports=$(grep 'Port' /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2 | grep -v 'no' | xargs)
-				dropbear_main=$(grep 'DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d'=' -f2)
-				dropbear_extra=$(grep 'DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear 2>/dev/null | grep -oP '\-p \K[0-9]+' | xargs)
-				all_ssh_ports="$ssh_ports $dropbear_main $dropbear_extra"
-				echo -e "\n\033[1;33mACTIVE SSH/DROPBEAR PORTS:\033[0m"
-				[[ -n "$ssh_ports" ]] && echo -e "  \033[1;32mOpenSSH:\033[1;37m $ssh_ports"
-				[[ -n "$dropbear_main" ]] && echo -e "  \033[1;32mDropbear:\033[1;37m $dropbear_main $dropbear_extra"
-				[[ -n "$all_ssh_ports" ]] || echo -e "  \033[1;31mNo active SSH ports found!"
 				echo ""
-				echo -ne "\033[1;32mEnter an active SSH/DROPBEAR port\033[1;33m:\033[1;37m "
-				read portssl
-				[[ -z "$portssl" ]] && {
-					echo -e "\n\033[1;31mInvalid port!"
-					sleep 2
-					inst_ssl
-				}
-				echo -e "\n\033[1;32mADDING PORT TO SSL TUNNEL\033[0m"
+				fun_bar 'sleep 2'
 				echo ""
-				fun_addssl() {
-					sniproxy_spawn_pair "$porta" "$portssl"
-				}
-				fun_bar 'fun_addssl'
-				echo -e "\n\033[1;32mPORT ADDED SUCCESSFULLY\033[0m"
+				echo -e "\033[1;32mRESTARTING SSL TUNNEL!\n"
+				fun_bar 'service stunnel4 restart' '/etc/init.d/stunnel4 restart'
+				echo ""
+				netstat -nltp | grep -q 'stunnel4' && echo -e "\033[1;32mPORT CHANGED SUCCESSFULLY!" || echo -e "\033[1;31mUNEXPECTED ERROR!"
 				sleep 3
-				inst_ssl
+				clear
+				fun_conexao
 			}
 			[[ "$resposta" = '2' ]] && {
-				clear
-				echo -e "\E[41;1;37m         REMOVE PORT FROM SSL TUNNEL         \E[0m"
-				echo -e "\n\033[1;33mPORTS IN USE: \033[1;37m$(sniproxy_listed_ports | xargs)\n"
-				echo -ne "\033[1;32mWHICH PORT DO YOU WANT TO REMOVE \033[1;33m?\033[1;37m "
-				read porta
-				[[ -z "$porta" ]] && {
-					echo -e "\n\033[1;31mInvalid port!"
-					sleep 2
-					inst_ssl
-				}
-				echo -e "\n\033[1;32mREMOVING PORT FROM SSL TUNNEL\033[0m"
-				echo ""
-				fun_delssl() {
-					sniproxy_drop_pair "$porta"
-				}
-				fun_bar 'fun_delssl'
-				echo -e "\n\033[1;32mPORT REMOVED SUCCESSFULLY\033[0m"
-				sleep 2
-				inst_ssl
-			}
-			[[ "$resposta" = '3' ]] && {
 				echo -e "\033[1;32mREMOVING SSL TUNNEL !\033[0m"
 				del_ssl() {
-					for s in $(screen -ls 2>/dev/null | grep -E '\.(sniproxy_|sslmux_)' | awk '{print $1}'); do
-						screen -S "$s" -X quit 2>/dev/null
-					done
-					sed -i '/sniproxy.py /d' /etc/autostart 2>/dev/null
-					sed -i '/sslmux_.* python3/d' /etc/autostart 2>/dev/null
 					service stunnel4 stop >/dev/null 2>&1
-					systemctl disable stunnel4 >/dev/null 2>&1
-					[[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=0/' /etc/default/stunnel4
-					rm -f /etc/stunnel/stunnel.conf /etc/stunnel/cert.pem /etc/stunnel/key.pem /etc/stunnel/.domain
+					apt-get remove stunnel4 -y >/dev/null 2>&1
+					apt-get purge stunnel4 -y >/dev/null 2>&1
+					rm -rf /etc/stunnel/stunnel.conf /etc/stunnel/stunnel.pem /etc/default/stunnel4
 				}
 				echo ""
 				fun_bar 'del_ssl'
@@ -1035,107 +866,159 @@ PY
 				sleep 3
 				fun_conexao
 			}
-			[[ "$resposta" = '4' ]] && {
-				clear
-				echo -e "\E[44;1;37m         CA / DYNAMIC SNI INFO         \E[0m\n"
-				echo -e "\033[1;33mThe SSL TUNNEL listener issues a fresh leaf certificate\033[0m"
-				echo -e "\033[1;33mfor every TLS handshake, with CN/SAN set to whatever SNI\033[0m"
-				echo -e "\033[1;33mthe client sent in the ClientHello. The cert is signed\033[0m"
-				echo -e "\033[1;33mby a long-lived local CA, cached on disk, and reused on\033[0m"
-				echo -e "\033[1;33mre-connect. There is no per-host configuration: any\033[0m"
-				echo -e "\033[1;33mdomain — your own, plus every bug-host SNI used to\033[0m"
-				echo -e "\033[1;33mbypass carrier billing — gets a matching certificate\033[0m"
-				echo -e "\033[1;33mautomatically.\033[0m"
-				echo ""
-				if [[ -s /etc/stunnel/sniproxy_ca.crt ]]; then
-					echo -e "\033[1;33mCA certificate:\033[0m"
-					openssl x509 -in /etc/stunnel/sniproxy_ca.crt -noout -subject -issuer -dates 2>/dev/null \
-						| awk '{print "  \033[1;36m" $0 "\033[0m"}'
-					echo ""
-					local _cached
-					_cached=$(ls -1 /etc/stunnel/sni_cache/*.crt 2>/dev/null | wc -l)
-					echo -e "\033[1;33mCached SNI leaf certs: \033[1;32m$_cached\033[0m"
-				else
-					echo -e "\033[1;31mCA not found yet — it will be created on first connection.\033[0m"
-				fi
-				echo ""
-				echo -ne "\033[1;31mPress ENTER to return to the menu...\033[0m"; read
-				inst_ssl
-			}
 			[[ "$resposta" = '0' ]] && fun_conexao
 			inst_ssl
 		else
 			clear
 			echo -e "\E[44;1;37m              INSTALL SSL TUNNEL               \E[0m"
 			echo ""
-			ssh_ports=$(grep 'Port' /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2 | grep -v 'no' | xargs)
+			ssh_ports=$(grep '^Port' /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2 | xargs)
 			dropbear_main=$(grep 'DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d'=' -f2)
-			dropbear_extra=$(grep 'DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear 2>/dev/null | grep -oP '\-p \K[0-9]+' | xargs)
-			all_ssh_ports="$ssh_ports $dropbear_main $dropbear_extra"
-			echo -e "\033[1;33mACTIVE SSH/DROPBEAR PORTS:\033[0m"
-			[[ -n "$ssh_ports" ]] && echo -e "  \033[1;32mOpenSSH:\033[1;37m $ssh_ports"
-			[[ -n "$dropbear_main" ]] && echo -e "  \033[1;32mDropbear:\033[1;37m $dropbear_main $dropbear_extra"
+			[[ -n "$ssh_ports" ]] && echo -e "\033[1;33mACTIVE OpenSSH PORTS:\033[1;37m $ssh_ports"
+			[[ -n "$dropbear_main" ]] && echo -e "\033[1;33mACTIVE Dropbear PORT:\033[1;37m $dropbear_main"
 			echo ""
-			echo -e "\033[1;33mINFORMATION:\033[0m"
-			echo -e "  SSL TUNNEL encapsulates the SSH/DROPBEAR connection in TLS"
-			echo -e "  using a dynamic-SNI listener. The TLS certificate is generated"
-			echo -e "  on the fly to match whatever SNI the client sends, so no"
-			echo -e "  per-host (or per-domain) configuration is needed."
+			echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;37m• \033[1;33mSTANDARD SSL TUNNEL (SSH)\033[0m"
+			echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;37m• \033[1;33mWEBSOCKET SSL TUNNEL\033[0m"
+			echo -e "\033[1;31m[\033[1;36m0\033[1;31m] \033[1;37m• \033[1;33mBACK\033[0m"
 			echo ""
-			echo -ne "\033[1;32mEnter an active SSH/DROPBEAR port\033[1;33m:\033[1;37m "
-			read portssl
-			[[ -z "$portssl" ]] && {
-				echo -e "\n\033[1;31mInvalid port!"
+			echo -ne "\033[1;32mWHAT DO YOU WANT TO DO \033[1;33m?\033[1;37m "
+			read resposta
+			echo ""
+			if [[ "$resposta" = '1' ]]; then
+				portssl='22'
+			elif [[ "$resposta" = '2' ]]; then
+				portssl='80'
+			elif [[ "$resposta" = '0' ]]; then
+				echo -e "\033[1;31mReturning...\033[0m"
 				sleep 2
+				fun_conexao
+			else
+				echo -e "\033[1;31mInvalid option !\033[0m"
+				sleep 1
 				inst_ssl
-			}
-			port_found=0
-			for p in $all_ssh_ports; do
-				[[ "$p" = "$portssl" ]] && port_found=1
-			done
-			if [[ $port_found -eq 0 ]]; then
-				echo -e "\n\033[1;33m[\033[1;31m!\033[1;33m] WARNING: Port $portssl is not in the list of active ports"
-				echo -ne "\033[1;32mDo you want to continue anyway \033[1;31m? \033[1;33m[y/n]:\033[1;37m "
-				read confirma
-				[[ "$confirma" != "y" ]] && inst_ssl
 			fi
 			clear
 			echo -e "\E[44;1;37m           SSL TUNNEL INSTALLER             \E[0m"
-			echo -e "\n\033[1;33mYOU ARE ABOUT TO INSTALL SSL TUNNEL !\033[0m"
+			echo -e "\n\033[1;33mYOU ARE ABOUT TO INSTALL SSL TUNNEL!\033[0m"
 			echo ""
-			echo -e "\n\033[1;33mDEFINE A PORT FOR SSL TUNNEL !\033[0m"
-			echo ""
-			read -p "$(echo -e "\033[1;32mWHICH PORT DO YOU WANT TO USE? \033[1;37m")" -e -i 443 porta
-			[[ -z "$porta" ]] && {
+			echo -ne "\033[1;32mDO YOU WANT TO CONTINUE \033[1;31m? \033[1;33m[y/n]:\033[1;37m "
+			read resposta
+			[[ "$resposta" = 'y' || "$resposta" = 's' ]] && {
+				echo -e "\n\033[1;33mDEFINE A PORT FOR SSL TUNNEL!\033[0m"
 				echo ""
-				echo -e "\033[1;31mInvalid port!"
+				read -p "$(echo -e "\033[1;32mWHICH PORT DO YOU WANT TO USE? \033[1;37m")" -e -i 443 porta
+				[[ -z "$porta" ]] && {
+					echo -e "\033[1;31mInvalid port!"
+					sleep 3
+					clear
+					fun_conexao
+				}
+				verif_ptrs $porta
+				[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/tcp >/dev/null 2>&1
+
+				# Move apache2 off the chosen port if it's squatting on it.
+				if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${porta}\$"; then
+					_holder=$(ss -tlnpH 2>/dev/null | awk -v p=":${porta}$" '$4 ~ p {print $NF; exit}')
+					if echo "$_holder" | grep -qE 'apache2|httpd'; then
+						sed -i "s/^[[:space:]]*Listen[[:space:]]\+${porta}[[:space:]]*\$/Listen 8443/g" /etc/apache2/ports.conf 2>/dev/null
+						service apache2 restart >/dev/null 2>&1
+						sleep 1
+					fi
+				fi
+
+				echo -e "\n\033[1;32mINSTALLING SSL TUNNEL!\033[1;33m"
+				echo ""
+				fun_bar 'apt-get update -y' 'apt-get install stunnel4 -y'
+				echo -e "\n\033[1;32mCONFIGURING SSL TUNNEL!\033[0m"
+				echo ""
+				ssl_conf() {
+					mkdir -p /etc/stunnel /var/run/stunnel4 /var/log/stunnel4
+					chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
+					cat >/etc/stunnel/stunnel.conf <<-STUNNEL_CONF
+						; SSHPlus SSL TUNNEL — stable configuration.
+						pid = /var/run/stunnel4/stunnel.pid
+						output = /var/log/stunnel4/stunnel.log
+						debug = 4
+						syslog = no
+
+						cert = /etc/stunnel/stunnel.pem
+						client = no
+
+						socket = a:SO_REUSEADDR=1
+						socket = a:SO_KEEPALIVE=1
+						socket = a:TCP_KEEPIDLE=60
+						socket = a:TCP_KEEPINTVL=15
+						socket = a:TCP_KEEPCNT=4
+						socket = l:TCP_NODELAY=1
+						socket = l:SO_KEEPALIVE=1
+						socket = r:TCP_NODELAY=1
+						socket = r:SO_KEEPALIVE=1
+
+						TIMEOUTbusy = 300
+						TIMEOUTclose = 0
+						TIMEOUTconnect = 30
+						TIMEOUTidle = 86400
+
+						[stunnel]
+						connect = 127.0.0.1:${portssl}
+						accept = ${porta}
+					STUNNEL_CONF
+				}
+				fun_bar 'ssl_conf'
+				echo -e "\n\033[1;32mCREATING CERTIFICATE!\033[0m"
+				echo ""
+				ssl_certif() {
+					if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
+						openssl genrsa -out /tmp/key.pem 2048 >/dev/null 2>&1
+						openssl req -new -x509 -key /tmp/key.pem -out /tmp/cert.pem -days 3650 -subj "/C=US/ST=NA/L=NA/O=SSHPlus/OU=SSHPlus/CN=sshplus.local" >/dev/null 2>&1
+						cat /tmp/cert.pem /tmp/key.pem >/etc/stunnel/stunnel.pem
+						rm -f /tmp/cert.pem /tmp/key.pem
+					fi
+					chown stunnel4:stunnel4 /etc/stunnel/stunnel.pem 2>/dev/null
+					chmod 600 /etc/stunnel/stunnel.pem
+					[[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/g' /etc/default/stunnel4
+					systemctl enable stunnel4 >/dev/null 2>&1
+					systemctl daemon-reload >/dev/null 2>&1
+				}
+				fun_bar 'ssl_certif'
+				echo -e "\n\033[1;32mSTARTING SSL TUNNEL!\033[0m"
+				echo ""
+				fun_finssl() {
+					service stunnel4 restart >/dev/null 2>&1
+					/etc/init.d/stunnel4 restart >/dev/null 2>&1
+					# Register the keep-alive watchdog so stunnel is
+					# resurrected within a minute if it ever dies.
+					if ! grep -q '# SSHPLUS_STUNNEL_WATCHDOG' /etc/autostart 2>/dev/null; then
+						cat >>/etc/autostart <<-'WATCH_EOF'
+							# SSHPLUS_STUNNEL_WATCHDOG
+							if [[ -f /etc/stunnel/stunnel.conf ]]; then
+								_acc=$(grep -E '^[[:space:]]*accept[[:space:]]*=' /etc/stunnel/stunnel.conf | awk -F'=' '{gsub(/[[:space:]]/,"",$2); print $2}' | awk -F: '{print $NF}')
+								for _p in $_acc; do
+									if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${_p}\$"; then
+										service stunnel4 restart >/dev/null 2>&1
+										break
+									fi
+								done
+							fi
+						WATCH_EOF
+					fi
+				}
+				fun_bar 'fun_finssl' 'service stunnel4 restart'
+				sleep 2
+				if netstat -nltp 2>/dev/null | grep -q "stunnel4.*:${porta}"; then
+					echo -e "\n\033[1;32mSSL TUNNEL INSTALLED SUCCESSFULLY!\033[1;31m PORT: \033[1;33m$porta\033[0m"
+				else
+					echo -e "\n\033[1;31mWARNING: stunnel4 did not bind port $porta. Check 'service stunnel4 status'.\033[0m"
+				fi
 				sleep 3
 				clear
 				fun_conexao
+			} || {
+				echo -e "\n\033[1;31mReturning...\033[0m"
+				sleep 2
+				clear
+				fun_conexao
 			}
-			verif_ptrs $porta
-			echo -e "\n\033[1;32mINSTALLING SSL TUNNEL !\033[1;33m"
-			echo ""
-			[[ -f "/usr/sbin/ufw" ]] && ufw allow ${porta}/tcp >/dev/null 2>&1
-			fun_bar 'sniproxy_bootstrap'
-			echo -e "\n\033[1;32mSTARTING SSL TUNNEL !\033[0m"
-			echo ""
-			fun_finssl() {
-				sniproxy_spawn_pair "$porta" "$portssl"
-				sleep 1
-			}
-			fun_bar 'fun_finssl'
-			clear
-			echo -e "\033[1;32m✓ SSL TUNNEL configured successfully!\033[0m"
-			echo -e "\033[1;33mListening on port:\033[1;32m $porta\033[0m"
-			echo -e "\033[1;33mConnecting to SSH/DROPBEAR port:\033[1;32m $portssl\033[0m"
-			echo ""
-			echo -e "\033[1;36mDynamic SNI is enabled — the TLS cert auto-matches\033[0m"
-			echo -e "\033[1;36mwhatever SNI the client sends (your own domain, any\033[0m"
-			echo -e "\033[1;36mbug-host, anything), so connecting via the domain\033[0m"
-			echo -e "\033[1;36mbehaves exactly like connecting via the IP.\033[0m"
-			sleep 6
-			fun_conexao
 		fi
 	}
 
@@ -2673,12 +2556,24 @@ exit 0' >$RCLOCAL
 			} || {
 				sts4="\033[1;31m○ "
 			}
-			[[ -e "/etc/stunnel/stunnel.conf" ]] && {
-				echo -e "\033[1;32mSERVICE: \033[1;33mSSL TUNNEL \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'stunnel' | awk {'print $4'} | cut -d: -f2 | xargs)"
-				sts3="\033[1;32m◉ "
-			} || {
+			if [[ -e "/etc/stunnel/stunnel.conf" ]]; then
+				_ssl_ports=$(netstat -nplt 2>/dev/null | grep 'stunnel' | awk '{print $4}' | awk -F: '{print $NF}' | sort -nu | xargs)
+				if [[ -z "$_ssl_ports" ]]; then
+					# Config exists but stunnel isn't listening — auto-revive.
+					service stunnel4 restart >/dev/null 2>&1
+					sleep 1
+					_ssl_ports=$(netstat -nplt 2>/dev/null | grep 'stunnel' | awk '{print $4}' | awk -F: '{print $NF}' | sort -nu | xargs)
+				fi
+				if [[ -n "$_ssl_ports" ]]; then
+					echo -e "\033[1;32mSERVICE: \033[1;33mSSL TUNNEL \033[1;32mPORT: \033[1;37m$_ssl_ports"
+					sts3="\033[1;32m◉ "
+				else
+					echo -e "\033[1;32mSERVICE: \033[1;33mSSL TUNNEL \033[1;31m(configured but not listening)"
+					sts3="\033[1;33m◐ "
+				fi
+			else
 				sts3="\033[1;31m○ "
-			}
+			fi
 			[[ "$(netstat -tlpn | grep 'dropbear' | wc -l)" != '0' ]] && {
 				echo -e "\033[1;32mSERVICE: \033[1;33mDROPBEAR \033[1;32mPORT: \033[1;37m$(netstat -nplt | grep 'dropbear' | awk -F ":" {'print $4'} | xargs)"
 				sts2="\033[1;32m◉ "
