@@ -487,7 +487,22 @@ service dropbear start >/dev/null 2>&1
 echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143\033[0m"
 
 # 4. Install SSL TUNNEL on port 443 using stunnel4 with a self-signed cert.
-echo -e "\033[1;33m[4/8] Installing SSL TUNNEL (port 443, stunnel4)...\033[0m"
+#
+# Topology: client ── TLS ──> stunnel4:443 ──> wsproxy:700 ──> sshd:22
+#
+# stunnel terminates TLS and hands the plaintext stream to wsproxy on
+# 127.0.0.1:700. wsproxy peeks the first bytes and chooses:
+#   - HTTP request line  → reply HTTP/1.1 101 then relay to sshd:22
+#                          (WEBSOCKET SSL Payload / WS SSL + Proxy mode)
+#   - Anything else      → forward straight to sshd:22 with no reply
+#                          (Standard SSL TUNNEL = raw SSH inside TLS)
+#
+# This single listener is what makes Standard SSL, WS SSL+Payload and
+# WS SSL+Payload+Proxy all work on the same 443 port. The previous
+# build pointed stunnel directly at sshd:22, which broke every mode
+# that sends an HTTP request first because sshd answered with
+# "Illegal packet size".
+echo -e "\033[1;33m[4/8] Installing SSL TUNNEL (port 443, stunnel4 + wsproxy mux)...\033[0m"
 
 # Free port 443 if apache2/nginx is squatting on it before stunnel binds.
 if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
@@ -507,13 +522,26 @@ if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
 	echo -e "\033[1;31m   ✗ Port 443 still in use${holder:+ by $holder}. Skipping SSL TUNNEL install.\033[0m"
 else
 	command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
+	command -v python3 >/dev/null 2>&1 || apt-get install python3 -y >/dev/null 2>&1
 	apt-get install -y stunnel4 >/dev/null 2>&1
 	mkdir -p /etc/stunnel /var/run/stunnel4 /var/log/stunnel4
 	chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
+
+	# Start the internal wsproxy multiplexer on 127.0.0.1:700 → ssh:22.
+	# It auto-detects HTTP vs raw streams (see wsproxy.py HTTP_METHODS).
+	if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
+		screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
+	fi
+	if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
+		echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22" >>/etc/autostart
+	fi
+
 	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'
 ; SSHPlus SSL TUNNEL — stable configuration.
-; The keep-alive sockets and long idle timeout prevent carrier NATs and
-; mobile firewalls from killing an idle SSH session inside the tunnel.
+; stunnel terminates TLS and hands the plaintext stream to the local
+; wsproxy multiplexer which transparently chooses raw-SSH vs HTTP
+; payload mode. Keep-alive sockets + long idle timeout prevent
+; carrier NATs and mobile firewalls from killing idle sessions.
 
 pid = /var/run/stunnel4/stunnel.pid
 output = /var/log/stunnel4/stunnel.log
@@ -539,7 +567,7 @@ TIMEOUTconnect = 30
 TIMEOUTidle = 86400
 
 [stunnel]
-connect = 127.0.0.1:22
+connect = 127.0.0.1:700
 accept = 443
 STUNNEL_CONF
 	if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
@@ -575,7 +603,8 @@ WATCH_EOF
 
 	sleep 1
 	if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
-		echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (stunnel4 -> 127.0.0.1:22)\033[0m"
+		echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (TLS → wsproxy:700 → ssh:22)\033[0m"
+		echo -e "\033[1;36m     Handles Standard SSL, WS SSL+Payload, and WS SSL+Payload+Proxy.\033[0m"
 		echo -e "\033[1;36m     Keep-alive + 24h idle timeout enabled; watchdog runs every minute.\033[0m"
 	else
 		echo -e "\033[1;31m   ✗ stunnel4 did not bind port 443. Check 'service stunnel4 status'.\033[0m"
@@ -811,6 +840,21 @@ fi
 # the slow leak from ever mattering.
 if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
 	(crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
+fi
+
+# 12. Auto Execution — run the SSHPlus menu the moment the user logs in
+# over SSH, so the box is usable without the user needing to know any
+# command names. This mirrors the [27] AUTO EXECUTION toggle in the
+# menu, but enables it at install time.
+echo -e "\033[1;33m[12] Enabling AUTO EXECUTION on SSH login...\033[0m"
+if [[ -f /etc/profile ]]; then
+	# Strip any prior `menu;` line so re-running doesn't stack duplicates,
+	# then append a single canonical entry.
+	grep -v '^menu;$' /etc/profile > /tmp/sshplus_profile && mv /tmp/sshplus_profile /etc/profile
+	echo "menu;" >> /etc/profile
+	echo -e "\033[1;32m   ✓ AUTO EXECUTION enabled (menu launches on every SSH login)\033[0m"
+else
+	echo -e "\033[1;33m   ⚠ /etc/profile missing — AUTO EXECUTION skipped\033[0m"
 fi
 
 echo ""

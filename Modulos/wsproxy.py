@@ -27,6 +27,16 @@ FTAG = '</font>'
 DEFAULT_HOST = "127.0.0.1:" + str(SSH_PORT)
 RESPONSE = ("HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n").encode('utf-8')
 
+# HTTP request lines we recognise as a payload-style handshake. Any
+# other first-byte pattern (SSH-2.0, a TLS ClientHello byte 0x16, raw
+# binary) is treated as a raw stream and forwarded straight to the
+# SSH backend without an HTTP reply — that is what makes a single
+# listener able to terminate Standard SSL TUNNEL (raw SSH inside TLS)
+# AND WebSocket SSL Payload (HTTP CONNECT/GET inside TLS) on the same
+# port.
+HTTP_METHODS = (b'GET ', b'POST ', b'HEAD ', b'CONNECT ', b'PUT ',
+                b'OPTIONS ', b'DELETE ', b'TRACE ', b'PATCH ')
+
 
 class Server(threading.Thread):
     def __init__(self, host, port):
@@ -134,32 +144,52 @@ class ConnectionHandler(threading.Thread):
 
     def run(self):
         try:
-            self.client_buffer = self.client.recv(BUFLEN).decode('utf-8', errors='replace')
+            # Peek at the first bytes from the client. If they look
+            # like an HTTP request line we treat the connection as a
+            # WebSocket / Payload handshake and send the HTTP/1.1 101
+            # reply the injector expects before relaying. Otherwise
+            # (raw SSH, raw TLS inside an outer TLS, generic binary)
+            # we forward everything we already buffered straight to
+            # the SSH backend with no HTTP reply — that's the mode
+            # Standard SSL TUNNEL needs.
+            first_chunk = self.client.recv(BUFLEN)
+            if not first_chunk:
+                return
 
-            hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
+            is_http = any(first_chunk.startswith(m) for m in HTTP_METHODS)
 
-            if hostPort == '':
-                hostPort = DEFAULT_HOST
+            if is_http:
+                self.client_buffer = first_chunk.decode('utf-8', errors='replace')
 
-            split = self.findHeader(self.client_buffer, 'X-Split')
+                hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
+                if hostPort == '':
+                    hostPort = DEFAULT_HOST
 
-            if split != '':
-                self.client.recv(BUFLEN)
+                split = self.findHeader(self.client_buffer, 'X-Split')
+                if split != '':
+                    self.client.recv(BUFLEN)
 
-            if hostPort != '':
                 passwd = self.findHeader(self.client_buffer, 'X-Pass')
-
                 if len(PASS) != 0 and passwd == PASS:
                     self.method_CONNECT(hostPort)
                 elif len(PASS) != 0 and passwd != PASS:
                     self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
-                elif hostPort.startswith('127.0.0.1') or hostPort.startswith('localhost'):
-                    self.method_CONNECT(hostPort)
                 else:
-                    self.client.send(b'HTTP/1.1 403 Forbidden!\r\n\r\n')
+                    # Accept any destination — this listener is
+                    # internal-only (stunnel / loopback) and the
+                    # injector picks the host. We always forward to
+                    # DEFAULT_HOST in practice because the payload
+                    # never sets X-Real-Host.
+                    self.method_CONNECT(hostPort)
             else:
-                print('- No X-Real-Host!')
-                self.client.send(b'HTTP/1.1 400 NoXRealHost!\r\n\r\n')
+                # Raw stream — forward to SSH without an HTTP reply.
+                self.method = 'TUNNEL'
+                self.log += ' - RAW ' + DEFAULT_HOST
+                self.connect_target(DEFAULT_HOST)
+                self.target.sendall(first_chunk)
+                self.client_buffer = ''
+                self.server.printLog(self.log)
+                self.doCONNECT()
 
         except Exception as e:
             self.log += ' - error: ' + str(e)

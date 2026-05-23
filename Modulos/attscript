@@ -149,6 +149,21 @@ fun_force_update () {
     mkdir -p /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
     chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 /etc/stunnel/stunnel.pem 2>/dev/null
     [[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+
+    # Migrate old installs whose stunnel.conf still points straight at
+    # sshd:22 — that breaks WS SSL+Payload and WS SSL+Payload+Proxy.
+    # Repoint at the wsproxy multiplexer on 127.0.0.1:700 and bring
+    # the multiplexer up so a single 443 listener covers every mode.
+    if grep -qE '^[[:space:]]*connect[[:space:]]*=[[:space:]]*127\.0\.0\.1:(22|80)[[:space:]]*$' /etc/stunnel/stunnel.conf; then
+      sed -i 's|^[[:space:]]*connect[[:space:]]*=.*|connect = 127.0.0.1:700|' /etc/stunnel/stunnel.conf
+    fi
+    if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
+      screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
+    fi
+    if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
+      echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22" >>/etc/autostart
+    fi
+
     systemctl enable stunnel4 >/dev/null 2>&1
     systemctl daemon-reload >/dev/null 2>&1
     service stunnel4 restart >/dev/null 2>&1
@@ -245,6 +260,17 @@ CONNTRACK_EOF
   # memory creep in the Python proxies.
   if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
     (crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
+  fi
+
+  # Enable AUTO EXECUTION (menu;) on login if /etc/profile doesn't have it.
+  if [[ -f /etc/profile ]] && ! grep -q '^menu;$' /etc/profile; then
+    grep -v '^menu;$' /etc/profile > /tmp/sshplus_profile && mv /tmp/sshplus_profile /etc/profile
+    echo "menu;" >> /etc/profile
+  fi
+
+  # Make sure BadVPN's screen session is alive on the next /etc/autostart tick.
+  if [[ -x /bin/badvpn-udpgw ]] && ! ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
+    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000 2>/dev/null
   fi
 
   [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1
