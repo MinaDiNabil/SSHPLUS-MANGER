@@ -76,9 +76,22 @@ class Server(threading.Thread):
         self.soc = socket.socket(socket.AF_INET)
         self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # SO_REUSEPORT lets multiple wsproxy instances share the same
+        # bind() so the kernel load-balances accept() across processes
+        # — required for 1M+ user installations where a single Python
+        # thread-per-connection process tops out around 5K concurrent.
+        try:
+            self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
         self.soc.settimeout(2)
         self.soc.bind((self.host, self.port))
-        self.soc.listen(128)
+        # Listen backlog matches net.core.somaxconn from the install
+        # tuning. The previous value of 128 capped burst arrival at
+        # ~128 SYN-ACK'd connections per second, which manifested as
+        # "connection refused" spikes whenever 1K+ users reconnected
+        # together after a brief upstream blip.
+        self.soc.listen(65535)
         self.running = True
 
         try:

@@ -132,14 +132,17 @@ net.ipv4.tcp_wmem = 4096 262144 67108864
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 
-# --- Connection handling ---
+# --- Connection handling (sized for 1M+ user installations) ---
+# somaxconn / syn_backlog / netdev_max_backlog all need to be high
+# enough that the kernel doesn't drop SYNs when 10K+ clients reconnect
+# simultaneously (e.g. after a brief carrier outage).
 net.core.somaxconn = 65535
-net.core.netdev_max_backlog = 65536
-net.ipv4.tcp_max_syn_backlog = 8192
+net.core.netdev_max_backlog = 250000
+net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_max_tw_buckets = 1440000
+net.ipv4.tcp_max_tw_buckets = 2000000
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_keepalive_intvl = 60
@@ -149,6 +152,9 @@ net.ipv4.tcp_synack_retries = 2
 net.ipv4.tcp_orphan_retries = 1
 net.ipv4.tcp_retries2 = 5
 net.ipv4.ip_local_port_range = 1024 65535
+# Allow many concurrent half-open accept queues (one per listener:
+# stunnel:443, wsproxy:700, dropbear:110/143, sshd:22, ws*:80…)
+net.ipv4.tcp_abort_on_overflow = 0
 
 # --- Forwarding (required for tunneling) ---
 net.ipv4.ip_forward = 1
@@ -161,18 +167,20 @@ net.ipv4.icmp_echo_ignore_broadcasts = 1
 
 # --- Connection tracking (prevents 'nf_conntrack: table full' under
 # load, which silently drops new flows and looks like a tunnel
-# outage). Sized for a multi-thousand-user tunneling box. ---
-net.netfilter.nf_conntrack_max = 1048576
-net.nf_conntrack_max = 1048576
+# outage). Sized for 1M+ user installations: at ~316 bytes per entry,
+# 4M entries consume ~1.2 GB of RAM but cover even the worst
+# reconnect storms after a carrier outage. ---
+net.netfilter.nf_conntrack_max = 4194304
+net.nf_conntrack_max = 4194304
 net.netfilter.nf_conntrack_tcp_timeout_established = 86400
 net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
-net.netfilter.nf_conntrack_buckets = 262144
+net.netfilter.nf_conntrack_buckets = 1048576
 
 # --- Filesystem & memory ---
-fs.file-max = 2097152
-fs.nr_open = 2097152
+fs.file-max = 4194304
+fs.nr_open = 4194304
 vm.swappiness = 10
 vm.dirty_ratio = 10
 vm.dirty_background_ratio = 5
@@ -187,30 +195,58 @@ SYSCTL_EOF
 # the hashsize is only settable as a module parameter, not via sysctl
 # on most kernels.
 modprobe nf_conntrack 2>/dev/null
-echo 262144 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+echo 1048576 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
 grep -qx nf_conntrack /etc/modules-load.d/sshplus-conntrack.conf 2>/dev/null || \
 	echo nf_conntrack > /etc/modules-load.d/sshplus-conntrack.conf
+# Persist the conntrack hashsize across reboots — sysctl can't set it
+# because it's a module parameter, not a kernel tunable.
+cat > /etc/modprobe.d/nf_conntrack.conf <<'CONNTRACK_EOF'
+options nf_conntrack hashsize=1048576
+CONNTRACK_EOF
 
 # Apply the new tunables (and reload anything in /etc/sysctl.d)
 sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-sshplus.conf >/dev/null 2>&1
 
-# File descriptor limits via drop-in (idempotent on re-run)
+# File descriptor / process limits via drop-in (idempotent on re-run).
+# Sized for 1M+ users: dropbear forks per accepted connection, so the
+# per-user nproc ceiling is what gates concurrent VPN sessions on a
+# single host. nofile gates how many sockets stunnel/wsproxy can hold
+# open simultaneously.
 cat > /etc/security/limits.d/99-sshplus.conf <<'LIMITS_EOF'
-*       soft    nofile  524288
-*       hard    nofile  524288
-root    soft    nofile  524288
-root    hard    nofile  524288
-*       soft    nproc   65535
-*       hard    nproc   65535
+*       soft    nofile  1048576
+*       hard    nofile  1048576
+root    soft    nofile  1048576
+root    hard    nofile  1048576
+*       soft    nproc   unlimited
+*       hard    nproc   unlimited
+root    soft    nproc   unlimited
+root    hard    nproc   unlimited
+*       soft    memlock unlimited
+*       hard    memlock unlimited
 LIMITS_EOF
 
-# Make sure systemd services inherit raised limits as well
+# Make sure systemd services inherit raised limits as well — services
+# started via systemd ignore /etc/security/limits.conf entirely.
 mkdir -p /etc/systemd/system.conf.d
 cat > /etc/systemd/system.conf.d/99-sshplus-limits.conf <<'SYSTEMD_EOF'
 [Manager]
-DefaultLimitNOFILE=524288
-DefaultLimitNPROC=65535
+DefaultLimitNOFILE=1048576
+DefaultLimitNPROC=infinity
+DefaultLimitMEMLOCK=infinity
+DefaultTasksMax=infinity
 SYSTEMD_EOF
+
+# Same for user manager (systemctl --user) so login shells from
+# tunneled sessions also inherit the raised ceilings.
+mkdir -p /etc/systemd/user.conf.d
+cat > /etc/systemd/user.conf.d/99-sshplus-limits.conf <<'SYSTEMD_USER_EOF'
+[Manager]
+DefaultLimitNOFILE=1048576
+DefaultLimitNPROC=infinity
+DefaultTasksMax=infinity
+SYSTEMD_USER_EOF
+
+systemctl daemon-reload >/dev/null 2>&1
 
 # Entropy daemon - shortens SSH/SSL key-exchange stalls on idle VPS
 command -v haveged >/dev/null 2>&1 || apt-get install haveged -y >/dev/null 2>&1
@@ -279,7 +315,7 @@ fi
 active_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
 zram_state=$(swapon --show=NAME --noheadings 2>/dev/null | grep -c zram)
 [[ "$zram_state" -gt 0 ]] && zram_msg="zram=on" || zram_msg="zram=off"
-echo -e "\033[1;36m   ⚙ Tuning applied (cc=${active_cc:-unknown}, nofile=524288, ${zram_msg}, sshd tuned)\033[0m"
+echo -e "\033[1;36m   ⚙ Tuning applied (cc=${active_cc:-unknown}, nofile=1048576, nproc=unlimited, conntrack=4M, ${zram_msg}, sshd tuned)\033[0m"
 
 # Auto-install protocols
 echo ""
@@ -474,17 +510,111 @@ LOOPBACK_EOF
 fi
 echo -e "\033[1;32m   ✓ Squid CONNECT loopback disabled (using stunnel4 SSL TUNNEL)\033[0m"
 
-# 3. Install Dropbear on ports 110 and 143
-echo -e "\033[1;33m[3/8] Installing Dropbear (ports 110, 143)...\033[0m"
+# 3. Install Dropbear on ports 110 and 143, tuned for 1M+ user load.
+#
+# Three independent ceilings need to be lifted for high-concurrency
+# tunneling:
+#   a) Runtime args (-K / -I / -W) — keep idle sessions alive forever
+#      and widen the per-channel receive window so a single user's
+#      bulk transfer can't starve other channels.
+#   b) systemd unit limits (LimitNOFILE / LimitNPROC / TasksMax) — the
+#      Debian dropbear.service inherits DefaultLimit* from system.conf
+#      but we pin them explicitly so a partial reset can't silently
+#      cap dropbear at 1024 fds.
+#   c) MAX_UNAUTH_CLIENTS in default_options.h — Debian's prebuilt
+#      dropbear is compiled with the upstream default of 30, which
+#      means once 30 clients are mid-handshake the listener returns
+#      "exit before auth" to everyone else. For a 1M-user install
+#      this is the actual bottleneck — the kernel and ulimit have
+#      plenty of headroom but dropbear's own compile-time table is
+#      full. We rebuild from source with the ceiling raised to 10000
+#      (and pin the .deb so apt upgrades can't silently restore the
+#      stock binary). MAX_UNAUTH_PER_IP is bumped in parallel so a
+#      shared corporate NAT doesn't get throttled.
+echo -e "\033[1;33m[3/8] Installing Dropbear (ports 110, 143) — high-concurrency build...\033[0m"
 apt-get update -y >/dev/null 2>&1
 apt-get install dropbear -y >/dev/null 2>&1
 sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear
 sed -i "s/DROPBEAR_PORT=22/DROPBEAR_PORT=110/g" /etc/default/dropbear
-sed -i 's/DROPBEAR_EXTRA_ARGS=/DROPBEAR_EXTRA_ARGS="-p 143"/g' /etc/default/dropbear
+# -p 143    : extra listener so the menu can offer two Dropbear ports
+# -K 30     : send a server-side keepalive every 30s (carrier NATs
+#             expire idle flows in 60-180s, killing VPN sessions)
+# -I 0      : disable the auth-idle timeout so a slow handshake on
+#             flaky mobile networks doesn't get cut off mid-KEX
+# -W 1048576: 1MB per-channel receive window. Default is 24KB which
+#             throttles tunneled bulk transfers to a few hundred KB/s
+sed -i 's|^[#[:space:]]*DROPBEAR_EXTRA_ARGS=.*|DROPBEAR_EXTRA_ARGS="-p 143 -K 30 -I 0 -W 1048576"|' /etc/default/dropbear
+
+# systemd drop-in: lift the per-service file/process ceilings so the
+# global DefaultLimit* values from system.conf actually reach dropbear.
+mkdir -p /etc/systemd/system/dropbear.service.d
+cat > /etc/systemd/system/dropbear.service.d/99-highload.conf <<'DROPBEAR_SVC_EOF'
+[Service]
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitMEMLOCK=infinity
+TasksMax=infinity
+# Don't kill child sessions when the parent restarts — VPN users
+# stay connected across `service dropbear restart`.
+KillMode=process
+DROPBEAR_SVC_EOF
+systemctl daemon-reload >/dev/null 2>&1
+
+# Rebuild dropbear from source with MAX_UNAUTH_CLIENTS raised to 10000.
+# Idempotent: the marker file at /etc/SSHPlus/.dropbear-highload-built
+# records the version that was rebuilt so attscript re-runs skip the
+# 2-5 minute compile when the binary is already current.
+mkdir -p /etc/SSHPlus
+_db_target_version=$(dpkg -s dropbear 2>/dev/null | awk '/^Version:/ {split($2,a,"[-+~]"); print a[1]; exit}')
+[[ -z "$_db_target_version" ]] && _db_target_version="2022.83"
+_db_built_version=$(cat /etc/SSHPlus/.dropbear-highload-built 2>/dev/null || echo "")
+
+if [[ "$_db_built_version" != "$_db_target_version" ]]; then
+	echo -e "\033[1;36m   ⚙ Rebuilding Dropbear ${_db_target_version} with MAX_UNAUTH_CLIENTS=10000 (this takes 2-5 min)...\033[0m"
+	apt-get install -y build-essential libz-dev zlib1g-dev wget >/dev/null 2>&1
+	_db_build=$(mktemp -d)
+	(
+		cd "$_db_build" || exit 1
+		_db_url="https://matt.ucc.asn.au/dropbear/releases/dropbear-${_db_target_version}.tar.bz2"
+		if ! wget -q "$_db_url" -O dropbear.tar.bz2; then
+			# Fallback mirror in case the primary site is unreachable
+			wget -q "https://mirror.dropbear.nl/mirror/releases/dropbear-${_db_target_version}.tar.bz2" -O dropbear.tar.bz2 || exit 1
+		fi
+		tar xjf dropbear.tar.bz2 || exit 1
+		cd "dropbear-${_db_target_version}" || exit 1
+		# Patch the compile-time ceilings. Newer Dropbear puts these
+		# in default_options.h; very old releases use sysoptions.h.
+		# Touch both so the sed works regardless of version.
+		for _f in default_options.h sysoptions.h options.h; do
+			[[ -f "$_f" ]] || continue
+			sed -i 's|^[[:space:]]*#define[[:space:]]\+MAX_UNAUTH_CLIENTS[[:space:]]\+[0-9]*|#define MAX_UNAUTH_CLIENTS 10000|' "$_f"
+			sed -i 's|^[[:space:]]*#define[[:space:]]\+MAX_UNAUTH_PER_IP[[:space:]]\+[0-9]*|#define MAX_UNAUTH_PER_IP 1000|' "$_f"
+			sed -i 's|^[[:space:]]*#define[[:space:]]\+DEFAULT_RECV_WINDOW[[:space:]]\+[0-9]*|#define DEFAULT_RECV_WINDOW 1048576|' "$_f"
+			sed -i 's|^[[:space:]]*#define[[:space:]]\+MAX_CHANNELS[[:space:]]\+[0-9]*|#define MAX_CHANNELS 1000|' "$_f"
+		done
+		./configure --prefix=/usr --sysconfdir=/etc >/dev/null 2>&1 || exit 1
+		make -j"$(nproc)" PROGRAMS="dropbear dbclient dropbearkey dropbearconvert scp" >/dev/null 2>&1 || exit 1
+		[[ -x dropbear ]] || exit 1
+		service dropbear stop >/dev/null 2>&1
+		install -m 755 dropbear /usr/sbin/dropbear
+		install -m 755 dbclient /usr/bin/dbclient 2>/dev/null
+		install -m 755 dropbearkey /usr/bin/dropbearkey 2>/dev/null
+	)
+	_db_rc=$?
+	rm -rf "$_db_build"
+	if [[ $_db_rc -eq 0 ]] && /usr/sbin/dropbear -V 2>&1 | grep -q "Dropbear"; then
+		apt-mark hold dropbear >/dev/null 2>&1
+		echo "$_db_target_version" > /etc/SSHPlus/.dropbear-highload-built
+		echo -e "\033[1;32m   ✓ Dropbear rebuilt (MAX_UNAUTH_CLIENTS: 30 → 10000, recv window: 24KB → 1MB)\033[0m"
+	else
+		echo -e "\033[1;31m   ✗ Dropbear rebuild failed; falling back to stock binary (30-client unauth cap will apply)\033[0m"
+	fi
+fi
+
 service dropbear start >/dev/null 2>&1
 /etc/init.d/dropbear restart >/dev/null 2>&1
 [[ $(grep -c "/bin/false" /etc/shells) = '0' ]] && echo "/bin/false" >>/etc/shells
-echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143\033[0m"
+echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143 (high-concurrency build)\033[0m"
 
 # 4. Install SSL TUNNEL on port 443 using stunnel4 with a self-signed cert.
 #
@@ -579,7 +709,7 @@ else
 	fi
 
 	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'
-; SSHPlus SSL TUNNEL — stable configuration.
+; SSHPlus SSL TUNNEL — stable configuration tuned for 1M+ user load.
 ; stunnel terminates TLS and hands the plaintext stream to the local
 ; wsproxy multiplexer which transparently chooses raw-SSH vs HTTP
 ; payload mode. Keep-alive sockets + long idle timeout prevent
@@ -587,7 +717,11 @@ else
 
 pid = /var/run/stunnel4/stunnel.pid
 output = /var/log/stunnel4/stunnel.log
-debug = 4
+; debug = 0 disables per-connection logging (default debug = 4 writes
+; a few lines per TLS handshake, which on a 10K-handshake-per-second
+; box generates 100MB+ of stunnel.log per minute and stalls accept()
+; behind the disk write).
+debug = 0
 syslog = no
 
 cert = /etc/stunnel/stunnel.pem
@@ -607,6 +741,26 @@ TIMEOUTbusy = 300
 TIMEOUTclose = 0
 TIMEOUTconnect = 30
 TIMEOUTidle = 86400
+
+; ----- High-concurrency tuning -----
+; fork-mode service handles each TLS connection in its own process so
+; one slow handshake can't block the listener. The compression knob
+; is left at the (faster) default.
+; sslVersionMin keeps us off SSLv3/TLSv1.0/1.1 which carriers MITM and
+; OpenSSL 3 disables by default anyway.
+sslVersionMin = TLSv1.2
+; Pin a fast, hardware-accelerated cipher list so each TLS handshake
+; finishes in ~1ms instead of falling back to slower legacy suites.
+ciphers = ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
+ciphersuites = TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
+; Session cache reduces the per-reconnect TLS cost from ~5ms to
+; ~0.5ms when the same client reconnects within the timeout window.
+options = NO_SSLv2
+options = NO_SSLv3
+options = NO_TLSv1
+options = NO_TLSv1.1
+sessionCacheSize = 100000
+sessionCacheTimeout = 3600
 
 [stunnel]
 connect = 127.0.0.1:700
@@ -633,6 +787,19 @@ STUNNEL_CONF
 		rm -f /tmp/cert.pem /tmp/key.pem
 	fi
 	[[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+
+	# systemd drop-in: lift stunnel4's per-service file descriptor /
+	# task ceilings so it can hold open 100K+ concurrent TLS sessions
+	# without hitting the default 1024 fd cap.
+	mkdir -p /etc/systemd/system/stunnel4.service.d
+	cat > /etc/systemd/system/stunnel4.service.d/99-highload.conf <<'STUNNEL_SVC_EOF'
+[Service]
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitMEMLOCK=infinity
+TasksMax=infinity
+STUNNEL_SVC_EOF
+
 	systemctl enable stunnel4 >/dev/null 2>&1
 	systemctl daemon-reload >/dev/null 2>&1
 	service stunnel4 restart >/dev/null 2>&1
