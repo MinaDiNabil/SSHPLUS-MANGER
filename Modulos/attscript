@@ -247,6 +247,17 @@ CONNTRACK_EOF
     (crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
   fi
 
+  # Enable AUTO EXECUTION (menu;) on login if /etc/profile doesn't have it.
+  if [[ -f /etc/profile ]] && ! grep -q '^menu;$' /etc/profile; then
+    grep -v '^menu;$' /etc/profile > /tmp/sshplus_profile && mv /tmp/sshplus_profile /etc/profile
+    echo "menu;" >> /etc/profile
+  fi
+
+  # Make sure BadVPN's screen session is alive on the next /etc/autostart tick.
+  if [[ -x /bin/badvpn-udpgw ]] && ! ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
+    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000 2>/dev/null
+  fi
+
   [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1
 
   touch /tmp/.sshplus_force_ok

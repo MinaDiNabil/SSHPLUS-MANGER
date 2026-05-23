@@ -813,6 +813,21 @@ if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
 	(crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
 fi
 
+# 12. Auto Execution — run the SSHPlus menu the moment the user logs in
+# over SSH, so the box is usable without the user needing to know any
+# command names. This mirrors the [27] AUTO EXECUTION toggle in the
+# menu, but enables it at install time.
+echo -e "\033[1;33m[12] Enabling AUTO EXECUTION on SSH login...\033[0m"
+if [[ -f /etc/profile ]]; then
+	# Strip any prior `menu;` line so re-running doesn't stack duplicates,
+	# then append a single canonical entry.
+	grep -v '^menu;$' /etc/profile > /tmp/sshplus_profile && mv /tmp/sshplus_profile /etc/profile
+	echo "menu;" >> /etc/profile
+	echo -e "\033[1;32m   ✓ AUTO EXECUTION enabled (menu launches on every SSH login)\033[0m"
+else
+	echo -e "\033[1;33m   ⚠ /etc/profile missing — AUTO EXECUTION skipped\033[0m"
+fi
+
 echo ""
 echo -e "\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 echo -e "\033[1;36m    ALL PROTOCOLS INSTALLED SUCCESSFULLY!    \033[0m"
