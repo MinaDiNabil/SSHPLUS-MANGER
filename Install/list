@@ -47,12 +47,35 @@ echo "PasswordAuthentication yes" >>/etc/ssh/sshd_config
 _dir1='/bin'
 _dir2='/etc/SSHPlus'
 rm $_dir2/ShellBot.sh $_dir2/cabecalho $_dir2/open.py $_dir2/proxy.py $_dir2/wsproxy.py $_dir2/sniproxy.py >/dev/null 2>&1
-_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "badvpn" "userbackup" "instsqd" "blockt" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh" "domaincheck")
+# "badvpn" deliberately excluded from this list — Modulos/badvpn is the
+# udpgw ELF binary, not the menu wrapper. Downloading it here would
+# overwrite /bin/badvpn with the binary, which is exactly the bug that
+# made the "[1] ATIVAR BADVPN" menu option run the binary with no args
+# (silent failure) instead of the install/start wrapper. The binary
+# itself is downloaded to /bin/badvpn-udpgw in section [1/8] below;
+# the menu wrapper is fetched from Sistema/badvpn after this loop.
+_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "userbackup" "instsqd" "blockt" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh" "domaincheck")
 for _arq in ${_mdls[@]}; do
 	[[ -e $_dir1/$_arq ]] && rm $_dir1/$_arq >/dev/null 2>&1
 	wget -c -P $_dir1 https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/$_arq
 	chmod +x $_dir1/$_arq
 done
+
+# Fetch the BadVPN menu wrapper from Sistema/ (not Modulos/, which is
+# the binary). If an older install left the binary at /bin/badvpn,
+# overwrite it so the menu option actually runs the wrapper.
+rm -f $_dir1/badvpn 2>/dev/null
+wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Sistema/badvpn -O $_dir1/badvpn
+if head -n1 $_dir1/badvpn 2>/dev/null | grep -q '^#!/bin/bash'; then
+	chmod +x $_dir1/badvpn
+else
+	# Download produced something that isn't a shell script (404 page,
+	# binary, …). Remove it so the menu option fails loudly instead of
+	# silently running garbage.
+	echo -e "\033[1;31m   ✗ Failed to fetch Sistema/badvpn (menu wrapper). [1] ATIVAR BADVPN will be unavailable.\033[0m"
+	rm -f $_dir1/badvpn
+fi
+
 mv $_dir1/cabecalho $_dir1/bot $_dir1/open.py $_dir1/proxy.py $_dir1/wsproxy.py $_dir2
 _arq_host="/etc/hosts"
 _host[0]="d1n212ccp6ldpw.cloudfront.net"

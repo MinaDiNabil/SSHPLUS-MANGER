@@ -92,9 +92,14 @@ fun_force_update () {
   [[ ! -d "$src/Modulos" ]] && { cd "$HOME"; rm -rf "$tmpdir"; return 1; }
 
   # Modules that live in /bin/ and are invoked directly by the menu.
+  # "badvpn" is intentionally absent — Modulos/badvpn is the udpgw
+  # ELF binary, not the menu wrapper. Copying it here would overwrite
+  # /bin/badvpn with the binary and break the "[1] ATIVAR BADVPN"
+  # menu option (silent failure: the binary runs with no args and
+  # exits). The wrapper is copied from Sistema/badvpn after this loop.
   local _mdls=(addhost delhost alterarsenha criarusuario expcleaner \
                mudardata remover criarteste verifbot droplimiter \
-               alterarlimite ajuda sshmonitor badvpn userbackup \
+               alterarlimite ajuda sshmonitor userbackup \
                instsqd blockt otimizar menu speedtest banner \
                senharoot reiniciarservicos reiniciarsistema attscript \
                conexao delscript detalhes botssh infousers verifatt \
@@ -108,6 +113,21 @@ fun_force_update () {
       chmod +x "/bin/$_arq"
     fi
   done
+
+  # BadVPN menu wrapper from Sistema/. Overwrites any binary that an
+  # older attscript run mistakenly placed at /bin/badvpn.
+  if [[ -f "$src/Sistema/badvpn" ]] && head -n1 "$src/Sistema/badvpn" 2>/dev/null | grep -q '^#!/bin/bash'; then
+    cp -f "$src/Sistema/badvpn" /bin/badvpn
+    dos2unix /bin/badvpn 2>/dev/null
+    chmod +x /bin/badvpn
+  fi
+
+  # BadVPN binary from Modulos/. The udpgw daemon itself lives at
+  # /bin/badvpn-udpgw; refresh it whenever the upstream binary changes
+  # so a fresh attscript run also picks up any binary update.
+  if [[ -f "$src/Modulos/badvpn" ]] && head -c 4 "$src/Modulos/badvpn" 2>/dev/null | grep -q $'\x7fELF'; then
+    install -m 755 "$src/Modulos/badvpn" /bin/badvpn-udpgw
+  fi
 
   # Helper files that live in /etc/SSHPlus/ (not run from /bin/).
   mkdir -p /etc/SSHPlus 2>/dev/null
