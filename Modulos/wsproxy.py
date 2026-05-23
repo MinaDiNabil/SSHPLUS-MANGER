@@ -170,46 +170,66 @@ class ConnectionHandler(threading.Thread):
 
     def run(self):
         try:
-            # Peek at the first bytes from the client.
+            # Peek at the first bytes from the client and pick the
+            # right tunneling mode. Behaviour matrix, derived from
+            # field testing against MinaProNet / HTTP Custom / HTTP
+            # Injector logs:
             #
-            #   CONNECT host:port HTTP/1.1   → reply 200, then relay
-            #     (WEBSOCKET SSL+Payload+Proxy — the injector's Proxy
-            #     stage expects RFC-style "200 Connection Established"
-            #     before it lets the SSH stage start.)
+            #   first bytes              | mode               | reply
+            #   -------------------------+--------------------+------------------
+            #   CONNECT host:port ...    | WS SSL+Payload+    | HTTP/1.0 200
+            #                            | Proxy              | Connection
+            #                            |                    | established
+            #   GET / POST / HEAD / ...  | WS SSL+Payload     | NO REPLY
+            #                            | (Upgrade: websocket| (drop payload,
+            #                            |  is a DPI decoy)   |  relay SSH only)
+            #   SSH-2.0-... / raw TLS /  | Standard SSL TUNNEL| NO REPLY
+            #   binary                   | (raw SSH-in-TLS)   | (forward as-is)
             #
-            #   GET / POST / HEAD / ...      → reply 101, then relay
-            #     (WEBSOCKET SSL+Payload — matches the upstream
-            #     SSHPLUS wsproxy.py behaviour the injectors were
-            #     designed against.)
-            #
-            #   Anything else (raw SSH-2.0, raw TLS bytes, binary)
-            #                                → no reply, just relay
-            #     (STANDARD SSL TUNNEL — raw SSH inside TLS. Sending
-            #     ANY HTTP reply here trips "Illegal packet size!" on
-            #     the SSH client.)
+            # The crucial detail: in Payload mode (GET / Upgrade:
+            # websocket) the injector does NOT consume any HTTP reply
+            # we send — it begins its SSH stage straight after the
+            # payload write. Replying with HTTP/1.x ... \r\n\r\n then
+            # made the SSH stage read 'HTTP' as the first SSH packet
+            # length, giving 1213486160 = 0x48545450 = "HTTP" in the
+            # "Illegal packet size!" error. Reply 0 bytes in that
+            # mode and just stream SSH back, and the SSH stage gets
+            # a clean banner.
             first_chunk = self.client.recv(BUFLEN)
             if not first_chunk:
                 return
 
-            is_http = any(first_chunk.startswith(m) for m in HTTP_METHODS)
+            is_connect = first_chunk.startswith(b'CONNECT ')
+            is_other_http = (not is_connect) and any(
+                first_chunk.startswith(m) for m in HTTP_METHODS
+            )
 
-            if is_http:
+            if is_connect:
+                # HTTP CONNECT proxy semantics — Proxy stage WILL
+                # consume the reply, then replace it for its SSH
+                # stage. Send the canonical 39-byte 200 reply.
                 self.client_buffer = first_chunk.decode('utf-8', errors='replace')
-
-                # X-Real-Host overrides the destination on Payload mode.
                 hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
                 if hostPort == '':
                     hostPort = DEFAULT_HOST
-
                 split = self.findHeader(self.client_buffer, 'X-Split')
                 if split != '':
                     self.client.recv(BUFLEN)
-
                 passwd = self.findHeader(self.client_buffer, 'X-Pass')
                 if len(PASS) != 0 and passwd != PASS:
                     self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
                 else:
                     self.method_CONNECT(hostPort, RESPONSE)
+            elif is_other_http:
+                # Payload-style decoy (GET / Upgrade: websocket).
+                # Drop the payload, do NOT send any HTTP reply, just
+                # bridge to the SSH backend.
+                self.method = 'PAYLOAD'
+                self.log += ' - PAYLOAD ' + DEFAULT_HOST
+                self.connect_target(DEFAULT_HOST)
+                self.client_buffer = ''
+                self.server.printLog(self.log)
+                self.doCONNECT()
             else:
                 # Raw stream — forward to SSH without an HTTP reply.
                 self.method = 'TUNNEL'
