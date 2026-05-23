@@ -937,12 +937,16 @@ LOOPBACK_EOF
 				echo ""
 
 				# Start the wsproxy multiplexer if it isn't already on 700.
+				# Backend is dropbear:110 because OpenSSH's KEXINIT is too
+				# large for Cloudflare WebSocket fragmentation — see the
+				# topology block in Install/list section 4.
 				start_sslmux() {
+					sed -i '/wsproxy\.py 700 22/d' /etc/autostart 2>/dev/null
 					if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-						screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
+						screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1
 					fi
-					if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
-						echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22" >>/etc/autostart
+					if ! grep -q 'wsproxy.py 700 110' /etc/autostart 2>/dev/null; then
+						echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110" >>/etc/autostart
 					fi
 				}
 				fun_bar 'start_sslmux'

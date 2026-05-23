@@ -299,11 +299,11 @@ if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
 		ok "Backend wsproxy multiplexer on 127.0.0.1:700 is up"
 	else
 		bad "Backend multiplexer (wsproxy on 127.0.0.1:700) is DOWN"
-		issue "NO_BACKEND|sniproxy is up on 443 but its backend wsproxy on 127.0.0.1:700 is dead. The TLS handshake completes server-side then fails to reach SSH, which on the wire looks like 'failed connect to socket server'. RESTART:  screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1"
+		issue "NO_BACKEND|sniproxy is up on 443 but its backend wsproxy on 127.0.0.1:700 is dead. The TLS handshake completes server-side then fails to reach SSH, which on the wire looks like 'failed connect to socket server'. RESTART:  screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 127.0.0.1"
 	fi
 else
 	bad "Port 443 is NOT listening on this server!"
-	issue "NO_443|Nothing is listening on port 443. Restart the SSL TUNNEL: bash -c 'screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700'  (and  screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1  if not already running)"
+	issue "NO_443|Nothing is listening on port 443. Restart the SSL TUNNEL: bash -c 'screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700'  (and  screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 127.0.0.1  if not already running)"
 fi
 
 if [[ -n "$OPENSSL" ]] && (( LISTENER_OK == 1 )); then
@@ -396,7 +396,7 @@ if [[ "${LOOPBACK_FAIL_PENDING:-0}" == 1 ]]; then
 		# and then closing), then respawns the multiplexer + SNI
 		# terminator pair. /etc/autostart's per-minute check brings
 		# them back if they ever die again.
-		issue "SNIPROXY_DEAD|Port 443 is listening but the TLS handshake fails (this happens when the SNI cert cache is corrupt or the listener is half-alive). FULL RESTART (copy-paste this one line):  for s in \$(screen -ls 2>/dev/null | awk '/\\.(sniproxy_|sslmux)/ {sub(/^[0-9]+\\./, \"\", \$1); print \$1}'); do screen -S \"\$s\" -X quit; done; rm -rf /etc/stunnel/sni_cache/* 2>/dev/null; sleep 2; screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 127.0.0.1; sleep 1; screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700; sleep 2; ss -tlnp | grep -E ':(443|700) '"
+		issue "SNIPROXY_DEAD|Port 443 is listening but the TLS handshake fails (this happens when the SNI cert cache is corrupt or the listener is half-alive). FULL RESTART (copy-paste this one line):  for s in \$(screen -ls 2>/dev/null | awk '/\\.(sniproxy_|sslmux)/ {sub(/^[0-9]+\\./, \"\", \$1); print \$1}'); do screen -S \"\$s\" -X quit; done; rm -rf /etc/stunnel/sni_cache/* 2>/dev/null; sleep 2; screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 127.0.0.1; sleep 1; screen -dmS sniproxy_443 python3 /etc/SSHPlus/sniproxy.py 443 700; sleep 2; ss -tlnp | grep -E ':(443|700) '"
 	fi
 fi
 

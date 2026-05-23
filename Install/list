@@ -488,13 +488,24 @@ echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143\033[0m"
 
 # 4. Install SSL TUNNEL on port 443 using stunnel4 with a self-signed cert.
 #
-# Topology: client ── TLS ──> stunnel4:443 ──> wsproxy:700 ──> sshd:22
+# Topology: client ── TLS ──> stunnel4:443 ──> wsproxy:700 ──> dropbear:110
+#
+# Backend is Dropbear (port 110), not OpenSSH (port 22). OpenSSH 8.2's
+# initial KEXINIT message lists ~12 KEX algorithms + ~10 ciphers + ~8
+# MACs which adds up to 1000+ bytes in the first server-to-client
+# segment. Cloudflare's WebSocket layer (Flexible/Full TLS modes) and
+# some carrier MITM boxes fragment that segment in ways the mobile
+# injector's SSH stage cannot reassemble, producing
+# "Illegal packet size" right after the SSL handshake.
+# Dropbear's KEXINIT is ~300 bytes and fits in a single frame, so the
+# WEBSOCKET SSL+Payload and WEBSOCKET SSL+Payload+Proxy modes both
+# connect reliably through Cloudflare.
 #
 # stunnel terminates TLS and hands the plaintext stream to wsproxy on
 # 127.0.0.1:700. wsproxy peeks the first bytes and chooses:
-#   - HTTP request line  → reply HTTP/1.1 101 then relay to sshd:22
+#   - HTTP request line  → reply HTTP/1.0 200 then relay to dropbear:110
 #                          (WEBSOCKET SSL Payload / WS SSL + Proxy mode)
-#   - Anything else      → forward straight to sshd:22 with no reply
+#   - Anything else      → forward straight to dropbear:110 with no reply
 #                          (Standard SSL TUNNEL = raw SSH inside TLS)
 #
 # This single listener is what makes Standard SSL, WS SSL+Payload and
@@ -549,19 +560,22 @@ else
 	mkdir -p /etc/stunnel /var/run/stunnel4 /var/log/stunnel4
 	chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
 
-	# Start the internal wsproxy multiplexer on 127.0.0.1:700 → ssh:22.
+	# Start the internal wsproxy multiplexer on 127.0.0.1:700 → dropbear:110.
 	# It auto-detects HTTP vs raw streams (see wsproxy.py HTTP_METHODS).
 	# Force-kill any old sslmux first so refreshed wsproxy.py takes
 	# effect — screen -dmS silently no-ops on duplicate session names,
 	# which is how stale code keeps serving after re-install.
+	# Also strip stale autostart entries that point at the legacy
+	# wsproxy.py 700 22 backend so reboots pick up the new target.
 	for _s in $(screen -ls 2>/dev/null | grep '\.sslmux' | awk '{print $1}'); do
 		screen -S "$_s" -X quit 2>/dev/null
 	done
 	screen -wipe >/dev/null 2>&1
+	sed -i '/wsproxy\.py 700 22/d' /etc/autostart 2>/dev/null
 	sleep 1
-	screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
-	if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
-		echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22" >>/etc/autostart
+	screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1
+	if ! grep -q 'wsproxy.py 700 110' /etc/autostart 2>/dev/null; then
+		echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110" >>/etc/autostart
 	fi
 
 	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'
@@ -643,7 +657,7 @@ WATCH_EOF
 
 	sleep 1
 	if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
-		echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (TLS → wsproxy:700 → ssh:22)\033[0m"
+		echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (TLS → wsproxy:700 → dropbear:110)\033[0m"
 		echo -e "\033[1;36m     Handles Standard SSL, WS SSL+Payload, and WS SSL+Payload+Proxy.\033[0m"
 		echo -e "\033[1;36m     Keep-alive + 24h idle timeout enabled; watchdog runs every minute.\033[0m"
 	else
