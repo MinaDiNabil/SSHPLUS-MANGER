@@ -513,8 +513,30 @@ if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
 		service apache2 restart >/dev/null 2>&1
 		sleep 1
 	elif echo "$holder" | grep -qE 'nginx'; then
-		echo -e "\033[1;33m   ⚠ nginx is on port 443. Disable its 443 server block manually then re-run install.\033[0m"
+		# Rewrite every "listen 443" to "listen 8443" in all enabled nginx
+		# configs, then reload. This is the same shape of fix we already
+		# use for apache. Without it, nginx keeps serving 443 with its
+		# own cert (e.g. a Let's Encrypt one) and stunnel never binds,
+		# which is exactly what produces logs like:
+		#   [SSL] Principal: CN=<your-domain>  (instead of CN=sshplus.local)
+		#   [PROXY] HTTP/1.1 526 / 400 Bad Request
+		# because the injector hits nginx, not the SSL TUNNEL.
+		for _f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf /etc/nginx/nginx.conf; do
+			[[ -f "$_f" ]] || continue
+			sed -i -E 's/(\<listen\b[[:space:]]+(\[[^]]*\]:)?)443\b/\18443/g' "$_f" 2>/dev/null
+		done
+		nginx -t >/dev/null 2>&1 && (systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null || systemctl restart nginx 2>/dev/null)
+		sleep 1
 	fi
+fi
+
+# After the move, if anything still holds 443, force-stop the obvious
+# culprits one last time. Stunnel will take over once they release.
+if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
+	for _svc in apache2 httpd nginx caddy haproxy; do
+		systemctl stop "$_svc" >/dev/null 2>&1
+	done
+	sleep 1
 fi
 
 if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
@@ -570,7 +592,19 @@ TIMEOUTidle = 86400
 connect = 127.0.0.1:700
 accept = 443
 STUNNEL_CONF
+	# Generate a fresh self-signed cert if the existing one is missing,
+	# expired, or doesn't have a private key in it (e.g. it's a leftover
+	# from a previous nginx/Let's Encrypt install). stunnel needs the
+	# concatenated cert + private key in the .pem file.
+	_regen_cert=0
 	if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
+		_regen_cert=1
+	elif ! grep -q "BEGIN .* PRIVATE KEY" /etc/stunnel/stunnel.pem 2>/dev/null; then
+		_regen_cert=1
+	elif ! openssl x509 -in /etc/stunnel/stunnel.pem -noout -checkend 0 >/dev/null 2>&1; then
+		_regen_cert=1
+	fi
+	if [[ $_regen_cert -eq 1 ]]; then
 		openssl genrsa -out /tmp/key.pem 2048 >/dev/null 2>&1
 		openssl req -new -x509 -key /tmp/key.pem -out /tmp/cert.pem -days 3650 -subj "/C=US/ST=NA/L=NA/O=SSHPlus/OU=SSHPlus/CN=sshplus.local" >/dev/null 2>&1
 		cat /tmp/cert.pem /tmp/key.pem >/etc/stunnel/stunnel.pem
