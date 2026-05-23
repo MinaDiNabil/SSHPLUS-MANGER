@@ -25,31 +25,29 @@ MSG = ''
 COR = '<font color="null">'
 FTAG = '</font>'
 DEFAULT_HOST = "127.0.0.1:" + str(SSH_PORT)
-# Single canonical reply for every HTTP-shaped first packet.
+# Reply that mobile injectors (MinaProNet, HTTP Custom, HTTP Injector,
+# ...) recognise as their canonical "proxy CONNECT succeeded" string
+# AND match case-sensitively against to decide whether to substitute.
 #
-# Mobile injectors (MinaProNet, HTTP Injector, HTTP Custom, ...) all
-# ship a "Proxy" stage that reads our reply and then *unconditionally
-# replaces* it with literally:
-#   HTTP/1.0 200 Connection established\r\n\r\n
-# before handing the rest of the stream to their SSH stage. We saw
-# this in the user's logs as the line:
-#   [PROXY] Replaced: HTTP/1.0 200 Connection Established\r\n\r\n
+# The injector's Proxy stage:
+#   1. reads up to \r\n\r\n from the wire,
+#   2. case-sensitively compares against
+#      "HTTP/1.0 200 Connection Established\r\n\r\n",
+#   3. if they match it consumes those bytes and lets the SSH stage
+#      read the next bytes — i.e. the SSH banner;
+#   4. if they don't match (different code, different wording, lower
+#      case "e" instead of "E"), the bytes stay on the wire and the
+#      SSH stage interprets them as its first packet header. That is
+#      why every earlier attempt produced "Illegal packet size!":
+#        - HTTP/1.1 101 <font ...>  →  bytes "HTTP" decoded as length
+#          1213486160 (= 0x48545450) once the substitution mismatch
+#          happens.
+#        - HTTP/1.0 200 Connection established (lowercase 'e')  →
+#          same failure, because "established" != "Established".
 #
-# Replying with the *same* string the injector is about to substitute
-# in means:
-#   - byte counts line up exactly (39 bytes in, 39 bytes out), so the
-#     injector's SSH stage starts reading at the same offset on the
-#     wire where our SSH banner actually starts.  Previously we sent
-#     43 bytes (HTTP/1.1 101 <font ...>) and the 4-byte mismatch was
-#     what the SSH stage decoded as the bogus packet length
-#     1231976033 (= "Ih=!" — bytes lifted from the middle of our
-#     "<font color=\"null\"></font>" reply).
-#   - response code is exactly what HTTP CONNECT proxies have used
-#     since the 90s, so every injector accepts it.
-# Both WS Payload (GET ... Upgrade: websocket) and WS Payload+Proxy
-# (CONNECT host:port) modes get the same reply; they're the same
-# tunnel handshake on the wire.
-RESPONSE = b"HTTP/1.0 200 Connection established\r\n\r\n"
+# Sending the EXACT 41-byte canonical reply makes the Proxy stage
+# happy and lets the SSH stage start reading on the SSH banner.
+RESPONSE = b"HTTP/1.0 200 Connection Established\r\n\r\n"
 RESPONSE_WS = RESPONSE
 RESPONSE_CONNECT = RESPONSE
 
@@ -171,65 +169,57 @@ class ConnectionHandler(threading.Thread):
     def run(self):
         try:
             # Peek at the first bytes from the client and pick the
-            # right tunneling mode. Behaviour matrix, derived from
-            # field testing against MinaProNet / HTTP Custom / HTTP
-            # Injector logs:
+            # right tunneling mode:
             #
             #   first bytes              | mode               | reply
-            #   -------------------------+--------------------+------------------
-            #   CONNECT host:port ...    | WS SSL+Payload+    | HTTP/1.0 200
-            #                            | Proxy              | Connection
-            #                            |                    | established
-            #   GET / POST / HEAD / ...  | WS SSL+Payload     | NO REPLY
-            #                            | (Upgrade: websocket| (drop payload,
-            #                            |  is a DPI decoy)   |  relay SSH only)
-            #   SSH-2.0-... / raw TLS /  | Standard SSL TUNNEL| NO REPLY
-            #   binary                   | (raw SSH-in-TLS)   | (forward as-is)
+            #   -------------------------+--------------------+--------------------
+            #   CONNECT host:port ...    | WS SSL+Payload+    | "HTTP/1.0 200
+            #                            | Proxy              |  Connection
+            #                            |                    |  Established\r\n\r\n"
+            #   GET / POST / HEAD / ...  | WS SSL+Payload     | same as above
+            #                            |                    | (injector still
+            #                            |                    |  expects an HTTP
+            #                            |                    |  response and
+            #                            |                    |  consumes it before
+            #                            |                    |  SSH stage starts)
+            #   SSH-2.0-... / raw TLS    | Standard SSL TUNNEL| no reply, forward
+            #                            | (raw SSH-in-TLS)   | first chunk as-is
             #
-            # The crucial detail: in Payload mode (GET / Upgrade:
-            # websocket) the injector does NOT consume any HTTP reply
-            # we send — it begins its SSH stage straight after the
-            # payload write. Replying with HTTP/1.x ... \r\n\r\n then
-            # made the SSH stage read 'HTTP' as the first SSH packet
-            # length, giving 1213486160 = 0x48545450 = "HTTP" in the
-            # "Illegal packet size!" error. Reply 0 bytes in that
-            # mode and just stream SSH back, and the SSH stage gets
-            # a clean banner.
+            # Why the EXACT phrase
+            # "HTTP/1.0 200 Connection Established\r\n\r\n" matters:
+            # the injector's Proxy stage does a CASE-SENSITIVE match
+            # against this string. If the reply matches verbatim, the
+            # Proxy stage consumes those 41 bytes off the wire and
+            # the SSH stage starts reading at the SSH banner. If the
+            # reply differs by even one character (lower-case 'e' in
+            # "established", or "HTTP/1.1 101 ..." instead of 200),
+            # the bytes stay on the wire, the SSH stage decodes them
+            # as a packet header, and we get
+            # "Illegal packet size!" with whatever 4 bytes were at
+            # the start of our reply (1213486160 = "HTTP",
+            # 1231976033 = "Ih=!", etc.).
             first_chunk = self.client.recv(BUFLEN)
             if not first_chunk:
                 return
 
-            is_connect = first_chunk.startswith(b'CONNECT ')
-            is_other_http = (not is_connect) and any(
-                first_chunk.startswith(m) for m in HTTP_METHODS
-            )
+            is_http = any(first_chunk.startswith(m) for m in HTTP_METHODS)
 
-            if is_connect:
-                # HTTP CONNECT proxy semantics — Proxy stage WILL
-                # consume the reply, then replace it for its SSH
-                # stage. Send the canonical 39-byte 200 reply.
+            if is_http:
                 self.client_buffer = first_chunk.decode('utf-8', errors='replace')
+
                 hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
                 if hostPort == '':
                     hostPort = DEFAULT_HOST
+
                 split = self.findHeader(self.client_buffer, 'X-Split')
                 if split != '':
                     self.client.recv(BUFLEN)
+
                 passwd = self.findHeader(self.client_buffer, 'X-Pass')
                 if len(PASS) != 0 and passwd != PASS:
                     self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
                 else:
                     self.method_CONNECT(hostPort, RESPONSE)
-            elif is_other_http:
-                # Payload-style decoy (GET / Upgrade: websocket).
-                # Drop the payload, do NOT send any HTTP reply, just
-                # bridge to the SSH backend.
-                self.method = 'PAYLOAD'
-                self.log += ' - PAYLOAD ' + DEFAULT_HOST
-                self.connect_target(DEFAULT_HOST)
-                self.client_buffer = ''
-                self.server.printLog(self.log)
-                self.doCONNECT()
             else:
                 # Raw stream — forward to SSH without an HTTP reply.
                 self.method = 'TUNNEL'
@@ -284,32 +274,21 @@ class ConnectionHandler(threading.Thread):
         self.targetClosed = False
         self.target.connect(address)
 
-    def method_CONNECT(self, path, reply=RESPONSE_WS):
+    def method_CONNECT(self, path, reply=RESPONSE):
         self.method = 'CONNECT'
         self.log += ' - CONNECT ' + path
 
         self.connect_target(path)
-
-        # Read the SSH banner from the backend first, then send the HTTP
-        # reply + banner in a single sendall(). This stops mobile
-        # injectors from racing — some of them start their SSH stage as
-        # soon as the Proxy stage consumes the HTTP reply, and if the
-        # SSH banner hasn't arrived yet they read whatever bytes are
-        # next on the wire and trip "Illegal packet size".
-        first_backend = b''
+        # Send ONLY the HTTP reply here. The SSH banner comes from
+        # the backend through the doCONNECT relay loop. Bundling them
+        # in a single sendall() turned out to feed the injector's SSH
+        # stage stray bytes from the reply tail (the source of every
+        # earlier "Illegal packet size" value: 1213486160 = "HTTP",
+        # 1231976033 = "Ih=!", ...) — keeping the reply alone lets
+        # the Proxy stage's case-sensitive consume cleanly delimit
+        # where SSH actually starts.
         try:
-            self.target.settimeout(3)
-            first_backend = self.target.recv(BUFLEN)
-        except (socket.timeout, OSError):
-            pass
-        finally:
-            try:
-                self.target.settimeout(None)
-            except OSError:
-                pass
-
-        try:
-            self.client.sendall(reply + first_backend)
+            self.client.sendall(reply)
         except OSError:
             pass
 
