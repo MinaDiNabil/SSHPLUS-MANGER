@@ -2,6 +2,17 @@
 #====================================================
 #	@MinaProNet
 #====================================================
+# Raise this install shell's own ulimits BEFORE any service is started.
+# limits.conf/pam_limits only take effect on the NEXT login — every
+# screen session and systemd unit spawned later in this script would
+# otherwise inherit the install shell's pre-tuning ceilings (typically
+# 1024 fds, 4096 procs) and silently cap there. Setting these now
+# means every child (wsproxy, proxy.py, open.py, badvpn-udpgw, ...)
+# starts with the same headroom the tuning block writes to disk.
+ulimit -n 1048576 2>/dev/null || ulimit -n 524288 2>/dev/null
+ulimit -u unlimited 2>/dev/null || ulimit -u 1048576 2>/dev/null
+ulimit -l unlimited 2>/dev/null
+
 _lvk=$(wget -qO- https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Sistema/versao)
 IP=$(wget -qO- ipv4.icanhazip.com)
 IP2=$(wget -qO- http://whatismyip.akamai.com/)
@@ -59,16 +70,32 @@ done
 [[ ! -e /etc/autostart ]] && {
 	echo '#!/bin/bash
 clear
+# Raise ulimits BEFORE spawning any screen sessions / daemons. Cron
+# (which runs this script every minute) inherits its own 1024-fd limit,
+# so without this every wsproxy/proxy.py/badvpn watchdog respawn would
+# silently cap at 1024 open sockets and refuse new clients well below
+# the 1M ceiling the rest of the install configures.
+ulimit -n 1048576 2>/dev/null || ulimit -n 524288 2>/dev/null
+ulimit -u unlimited 2>/dev/null || ulimit -u 1048576 2>/dev/null
+ulimit -l unlimited 2>/dev/null
 #INICIO AUTOMATICO' >/etc/autostart
 	chmod +x /etc/autostart
 } || {
 	[[ $(ps x | grep "bot_plus" | grep -v grep | wc -l) != '0' ]] && wget -qO- https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/ShellBot.sh
 	for proc in $(ps x | grep 'dmS' | grep -v 'grep' | awk {'print $1'}); do
-		screen -r -S "$proc" -X quit	
+		screen -r -S "$proc" -X quit
 done
 	screen -wipe >/dev/null
 	echo '#!/bin/bash
 clear
+# Raise ulimits BEFORE spawning any screen sessions / daemons. Cron
+# (which runs this script every minute) inherits its own 1024-fd limit,
+# so without this every wsproxy/proxy.py/badvpn watchdog respawn would
+# silently cap at 1024 open sockets and refuse new clients well below
+# the 1M ceiling the rest of the install configures.
+ulimit -n 1048576 2>/dev/null || ulimit -n 524288 2>/dev/null
+ulimit -u unlimited 2>/dev/null || ulimit -u 1048576 2>/dev/null
+ulimit -l unlimited 2>/dev/null
 #INICIO AUTOMATICO' >/etc/autostart
 	chmod +x /etc/autostart
 }
@@ -295,8 +322,15 @@ if [[ -f /etc/ssh/sshd_config ]]; then
 	TCPKeepAlive yes
 	ClientAliveInterval 60
 	ClientAliveCountMax 3
-	MaxStartups 100:30:200
-	MaxSessions 50
+	# High-concurrency limits for 1M+ user installations. MaxStartups
+	# is the unauth concurrency cap (start:rate:full) — at 10000 we
+	# accept 10K simultaneous mid-handshake clients, drop 30% of new
+	# arrivals between 10K and 50K, and full-drop above 50K. MaxSessions
+	# raises the per-connection channel ceiling so multiplexed tunnels
+	# (e.g. game traffic + voice + control on one SSH session) don't
+	# starve at 50.
+	MaxStartups 10000:30:50000
+	MaxSessions 200
 	LoginGraceTime 30
 	# END SSHPLUS-TUNING
 	SSH_EOF
@@ -339,8 +373,20 @@ elif ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
 	echo -e "\033[1;33m   ⚠ Port 7300/udp already in use. BadVPN not started.\033[0m"
 else
 	chmod 755 /bin/badvpn-udpgw
-	screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000
-	echo -e "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000" >> /etc/autostart
+	# High-concurrency BadVPN args for 1M+ user installations:
+	#   --max-clients 1000000        : was 10000 — this is the hard cap
+	#                                  on simultaneous UDP-gateway clients
+	#   --max-connections-for-client 100 : was 10 — modern games/voice
+	#                                      apps open multiple parallel
+	#                                      UDP flows per client
+	#   --client-socket-sndbuf 1048576  : was 10000 — 1MB send buffer so
+	#                                     bursty media doesn't drop frames
+	screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576
+	# Strip any stale low-cap autostart entry from previous installs so
+	# the per-minute watchdog respawns the high-cap version on reboot.
+	sed -i '/badvpn-udpgw .*--max-clients 10000 /d' /etc/autostart 2>/dev/null
+	grep -q 'badvpn-udpgw.*--max-clients 1000000' /etc/autostart 2>/dev/null || \
+		echo -e "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576" >> /etc/autostart
 
 	sleep 1
 	if ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
@@ -467,8 +513,71 @@ else
 		request_header_access X-Cache deny all
 		request_header_access X-Cache-Lookup deny all
 		request_header_access Connection deny all
+
+		# ----- High-concurrency tuning for 1M+ user installations -----
+		# Squid defaults to 1024 file descriptors, which caps it at
+		# ~500 concurrent CONNECT tunnels. Bumping max_filedesc lets
+		# it ride the 1M nofile ceiling from /etc/security/limits.d.
+		max_filedescriptors 1048576
+		# Workers: spawn one Squid worker per CPU core (max 16). Each
+		# worker has its own accept queue so a single slow handshake
+		# can't block all incoming connections.
+		workers 8
+		# Disable on-disk cache entirely — proxy is being used as a
+		# tunnel, not a content cache, so the disk I/O is pure
+		# overhead and uses up file descriptors.
+		cache deny all
+		cache_dir null /tmp
+		# Memory cache off too: nothing to cache on tunnel traffic.
+		cache_mem 8 MB
+		maximum_object_size 0 KB
+		maximum_object_size_in_memory 0 KB
+		# Quick-abort: cleanly tear down a CONNECT tunnel when either
+		# side disconnects rather than holding the fd open for the
+		# default 1 hour.
+		quick_abort_min 0 KB
+		quick_abort_max 0 KB
+		quick_abort_pct 100
+		# Idle CONNECT tunnels (e.g. VPN sessions) — keep them alive
+		# for 24h instead of squid's default 15-minute kill.
+		client_lifetime 24 hours
+		half_closed_clients off
+		# DNS pool: one worker per resolver, queue depth for bursts.
+		dns_nameservers 1.1.1.1 8.8.8.8
+		ipcache_size 65536
+		fqdncache_size 65536
+		positive_dns_ttl 6 hours
+		negative_dns_ttl 1 minute
+		# Don't waste CPU on access.log writes for a tunnel proxy.
+		access_log none
+		cache_log /var/log/squid/cache.log
+		cache_store_log none
+		logfile_rotate 0
+		# Buffer sizes — squid's defaults assume a web proxy, not a
+		# VPN tunnel handling 100s of MB per session.
+		read_ahead_gap 64 KB
+		client_request_buffer_max_size 512 KB
 		SQUID_EOF
 
+		# systemd drop-in: lift squid's per-service ceilings so the
+		# max_filedescriptors directive above actually takes effect.
+		# (squid.conf can request 1M fds but if the unit caps at 4096,
+		# squid silently clamps to 4096 and logs nothing.)
+		mkdir -p /etc/systemd/system/${squid_service}.service.d
+		cat > /etc/systemd/system/${squid_service}.service.d/99-highload.conf <<-SQUID_SVC_EOF
+		[Service]
+		LimitNOFILE=1048576
+		LimitNPROC=infinity
+		LimitMEMLOCK=infinity
+		TasksMax=infinity
+		SQUID_SVC_EOF
+
+		# Pre-create cache directories (even though caching is off,
+		# squid -k parse still validates the cache_dir path).
+		mkdir -p /var/log/squid /var/cache/squid 2>/dev/null
+		chown -R $squid_user /var/log/squid /var/cache/squid 2>/dev/null
+
+		systemctl daemon-reload >/dev/null 2>&1
 		systemctl enable $squid_service >/dev/null 2>&1
 		systemctl restart $squid_service >/dev/null 2>&1 || service $squid_service restart >/dev/null 2>&1
 

@@ -34,9 +34,17 @@ class Server(threading.Thread):
         self.soc = socket.socket(socket.AF_INET)
         self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # SO_REUSEPORT lets multiple open.py instances share the same
+        # bind() so the kernel load-balances accept() across processes.
+        try:
+            self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
         self.soc.settimeout(2)
         self.soc.bind((self.host, self.port))
-        self.soc.listen(128)
+        # Listen backlog matches net.core.somaxconn from the install
+        # tuning so reconnect storms don't spill to "connection refused".
+        self.soc.listen(65535)
         self.running = True
 
         try:
