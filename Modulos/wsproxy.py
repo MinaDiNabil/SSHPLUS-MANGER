@@ -25,21 +25,33 @@ MSG = ''
 COR = '<font color="null">'
 FTAG = '</font>'
 DEFAULT_HOST = "127.0.0.1:" + str(SSH_PORT)
-# Two distinct replies, picked per request line:
-#   - 101 Switching Protocols  → returned for WebSocket-style payloads
-#     (GET ... Upgrade: websocket). Matches what the original SSHPLUS
-#     wsproxy.py replied with and what mobile injector "Payload" modes
-#     consume.
-#   - 200 Connection Established → returned for HTTP CONNECT. This is
-#     the RFC 7231 / 9110 proxy semantics. Returning 101 here breaks
-#     "WebSocket SSL+Payload+Proxy" because the injector's Proxy stage
-#     reads the response, decides it's the wrong code (or a wrong-stage
-#     WS upgrade), and trips "Illegal packet size" inside the SSH
-#     component on the bytes that follow.
-RESPONSE_WS = ("HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n").encode('utf-8')
-RESPONSE_CONNECT = ("HTTP/1.1 200 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n").encode('utf-8')
-# Legacy alias — kept so any caller still importing RESPONSE keeps working.
-RESPONSE = RESPONSE_WS
+# Single canonical reply for every HTTP-shaped first packet.
+#
+# Mobile injectors (MinaProNet, HTTP Injector, HTTP Custom, ...) all
+# ship a "Proxy" stage that reads our reply and then *unconditionally
+# replaces* it with literally:
+#   HTTP/1.0 200 Connection established\r\n\r\n
+# before handing the rest of the stream to their SSH stage. We saw
+# this in the user's logs as the line:
+#   [PROXY] Replaced: HTTP/1.0 200 Connection Established\r\n\r\n
+#
+# Replying with the *same* string the injector is about to substitute
+# in means:
+#   - byte counts line up exactly (39 bytes in, 39 bytes out), so the
+#     injector's SSH stage starts reading at the same offset on the
+#     wire where our SSH banner actually starts.  Previously we sent
+#     43 bytes (HTTP/1.1 101 <font ...>) and the 4-byte mismatch was
+#     what the SSH stage decoded as the bogus packet length
+#     1231976033 (= "Ih=!" — bytes lifted from the middle of our
+#     "<font color=\"null\"></font>" reply).
+#   - response code is exactly what HTTP CONNECT proxies have used
+#     since the 90s, so every injector accepts it.
+# Both WS Payload (GET ... Upgrade: websocket) and WS Payload+Proxy
+# (CONNECT host:port) modes get the same reply; they're the same
+# tunnel handshake on the wire.
+RESPONSE = b"HTTP/1.0 200 Connection established\r\n\r\n"
+RESPONSE_WS = RESPONSE
+RESPONSE_CONNECT = RESPONSE
 
 # HTTP request lines we recognise as a payload-style handshake. Any
 # other first-byte pattern (SSH-2.0, a TLS ClientHello byte 0x16, raw
@@ -179,12 +191,9 @@ class ConnectionHandler(threading.Thread):
             if not first_chunk:
                 return
 
-            is_connect = first_chunk.startswith(b'CONNECT ')
-            is_other_http = (not is_connect) and any(
-                first_chunk.startswith(m) for m in HTTP_METHODS
-            )
+            is_http = any(first_chunk.startswith(m) for m in HTTP_METHODS)
 
-            if is_connect or is_other_http:
+            if is_http:
                 self.client_buffer = first_chunk.decode('utf-8', errors='replace')
 
                 # X-Real-Host overrides the destination on Payload mode.
@@ -200,8 +209,7 @@ class ConnectionHandler(threading.Thread):
                 if len(PASS) != 0 and passwd != PASS:
                     self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
                 else:
-                    reply = RESPONSE_CONNECT if is_connect else RESPONSE_WS
-                    self.method_CONNECT(hostPort, reply)
+                    self.method_CONNECT(hostPort, RESPONSE)
             else:
                 # Raw stream — forward to SSH without an HTTP reply.
                 self.method = 'TUNNEL'

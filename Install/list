@@ -551,9 +551,15 @@ else
 
 	# Start the internal wsproxy multiplexer on 127.0.0.1:700 → ssh:22.
 	# It auto-detects HTTP vs raw streams (see wsproxy.py HTTP_METHODS).
-	if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-		screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
-	fi
+	# Force-kill any old sslmux first so refreshed wsproxy.py takes
+	# effect — screen -dmS silently no-ops on duplicate session names,
+	# which is how stale code keeps serving after re-install.
+	for _s in $(screen -ls 2>/dev/null | grep '\.sslmux' | awk '{print $1}'); do
+		screen -S "$_s" -X quit 2>/dev/null
+	done
+	screen -wipe >/dev/null 2>&1
+	sleep 1
+	screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
 	if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
 		echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22" >>/etc/autostart
 	fi
