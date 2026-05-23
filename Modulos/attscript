@@ -169,6 +169,20 @@ fun_force_update () {
     service stunnel4 restart >/dev/null 2>&1
   fi
 
+  # Force-restart every Python proxy screen so the refreshed wsproxy.py /
+  # proxy.py / open.py code is actually running. screen -dmS without a
+  # prior quit silently skips when a session with the same name already
+  # exists, which is exactly how an old wsproxy keeps serving stale
+  # logic after a /bin/attscript upgrade.
+  for s in $(screen -ls 2>/dev/null | grep -E '\.(sslmux|ws[0-9]*|proxy|openpy)' | awk '{print $1}'); do
+    screen -S "$s" -X quit 2>/dev/null
+  done
+  screen -wipe >/dev/null 2>&1
+  sleep 1
+  if [[ -x /etc/SSHPlus/wsproxy.py ]] && ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
+    screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
+  fi
+
   # Refresh /etc/autostart with the unified watchdog + stunnel watchdog
   # blocks. Older installs that pre-date these blocks pick them up here.
   if ! grep -q '# SSHPLUS_STUNNEL_WATCHDOG' /etc/autostart 2>/dev/null; then

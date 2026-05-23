@@ -261,9 +261,31 @@ class ConnectionHandler(threading.Thread):
         self.log += ' - CONNECT ' + path
 
         self.connect_target(path)
-        self.client.sendall(reply)
-        self.client_buffer = ''
 
+        # Read the SSH banner from the backend first, then send the HTTP
+        # reply + banner in a single sendall(). This stops mobile
+        # injectors from racing — some of them start their SSH stage as
+        # soon as the Proxy stage consumes the HTTP reply, and if the
+        # SSH banner hasn't arrived yet they read whatever bytes are
+        # next on the wire and trip "Illegal packet size".
+        first_backend = b''
+        try:
+            self.target.settimeout(3)
+            first_backend = self.target.recv(BUFLEN)
+        except (socket.timeout, OSError):
+            pass
+        finally:
+            try:
+                self.target.settimeout(None)
+            except OSError:
+                pass
+
+        try:
+            self.client.sendall(reply + first_backend)
+        except OSError:
+            pass
+
+        self.client_buffer = ''
         self.server.printLog(self.log)
         self.doCONNECT()
 
