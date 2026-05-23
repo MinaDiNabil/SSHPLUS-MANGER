@@ -25,7 +25,21 @@ MSG = ''
 COR = '<font color="null">'
 FTAG = '</font>'
 DEFAULT_HOST = "127.0.0.1:" + str(SSH_PORT)
-RESPONSE = ("HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n").encode('utf-8')
+# Two distinct replies, picked per request line:
+#   - 101 Switching Protocols  → returned for WebSocket-style payloads
+#     (GET ... Upgrade: websocket). Matches what the original SSHPLUS
+#     wsproxy.py replied with and what mobile injector "Payload" modes
+#     consume.
+#   - 200 Connection Established → returned for HTTP CONNECT. This is
+#     the RFC 7231 / 9110 proxy semantics. Returning 101 here breaks
+#     "WebSocket SSL+Payload+Proxy" because the injector's Proxy stage
+#     reads the response, decides it's the wrong code (or a wrong-stage
+#     WS upgrade), and trips "Illegal packet size" inside the SSH
+#     component on the bytes that follow.
+RESPONSE_WS = ("HTTP/1.1 101 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n").encode('utf-8')
+RESPONSE_CONNECT = ("HTTP/1.1 200 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n").encode('utf-8')
+# Legacy alias — kept so any caller still importing RESPONSE keeps working.
+RESPONSE = RESPONSE_WS
 
 # HTTP request lines we recognise as a payload-style handshake. Any
 # other first-byte pattern (SSH-2.0, a TLS ClientHello byte 0x16, raw
@@ -144,23 +158,36 @@ class ConnectionHandler(threading.Thread):
 
     def run(self):
         try:
-            # Peek at the first bytes from the client. If they look
-            # like an HTTP request line we treat the connection as a
-            # WebSocket / Payload handshake and send the HTTP/1.1 101
-            # reply the injector expects before relaying. Otherwise
-            # (raw SSH, raw TLS inside an outer TLS, generic binary)
-            # we forward everything we already buffered straight to
-            # the SSH backend with no HTTP reply — that's the mode
-            # Standard SSL TUNNEL needs.
+            # Peek at the first bytes from the client.
+            #
+            #   CONNECT host:port HTTP/1.1   → reply 200, then relay
+            #     (WEBSOCKET SSL+Payload+Proxy — the injector's Proxy
+            #     stage expects RFC-style "200 Connection Established"
+            #     before it lets the SSH stage start.)
+            #
+            #   GET / POST / HEAD / ...      → reply 101, then relay
+            #     (WEBSOCKET SSL+Payload — matches the upstream
+            #     SSHPLUS wsproxy.py behaviour the injectors were
+            #     designed against.)
+            #
+            #   Anything else (raw SSH-2.0, raw TLS bytes, binary)
+            #                                → no reply, just relay
+            #     (STANDARD SSL TUNNEL — raw SSH inside TLS. Sending
+            #     ANY HTTP reply here trips "Illegal packet size!" on
+            #     the SSH client.)
             first_chunk = self.client.recv(BUFLEN)
             if not first_chunk:
                 return
 
-            is_http = any(first_chunk.startswith(m) for m in HTTP_METHODS)
+            is_connect = first_chunk.startswith(b'CONNECT ')
+            is_other_http = (not is_connect) and any(
+                first_chunk.startswith(m) for m in HTTP_METHODS
+            )
 
-            if is_http:
+            if is_connect or is_other_http:
                 self.client_buffer = first_chunk.decode('utf-8', errors='replace')
 
+                # X-Real-Host overrides the destination on Payload mode.
                 hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
                 if hostPort == '':
                     hostPort = DEFAULT_HOST
@@ -170,17 +197,11 @@ class ConnectionHandler(threading.Thread):
                     self.client.recv(BUFLEN)
 
                 passwd = self.findHeader(self.client_buffer, 'X-Pass')
-                if len(PASS) != 0 and passwd == PASS:
-                    self.method_CONNECT(hostPort)
-                elif len(PASS) != 0 and passwd != PASS:
+                if len(PASS) != 0 and passwd != PASS:
                     self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
                 else:
-                    # Accept any destination — this listener is
-                    # internal-only (stunnel / loopback) and the
-                    # injector picks the host. We always forward to
-                    # DEFAULT_HOST in practice because the payload
-                    # never sets X-Real-Host.
-                    self.method_CONNECT(hostPort)
+                    reply = RESPONSE_CONNECT if is_connect else RESPONSE_WS
+                    self.method_CONNECT(hostPort, reply)
             else:
                 # Raw stream — forward to SSH without an HTTP reply.
                 self.method = 'TUNNEL'
@@ -235,14 +256,36 @@ class ConnectionHandler(threading.Thread):
         self.targetClosed = False
         self.target.connect(address)
 
-    def method_CONNECT(self, path):
+    def method_CONNECT(self, path, reply=RESPONSE_WS):
         self.method = 'CONNECT'
         self.log += ' - CONNECT ' + path
 
         self.connect_target(path)
-        self.client.sendall(RESPONSE)
-        self.client_buffer = ''
 
+        # Read the SSH banner from the backend first, then send the HTTP
+        # reply + banner in a single sendall(). This stops mobile
+        # injectors from racing — some of them start their SSH stage as
+        # soon as the Proxy stage consumes the HTTP reply, and if the
+        # SSH banner hasn't arrived yet they read whatever bytes are
+        # next on the wire and trip "Illegal packet size".
+        first_backend = b''
+        try:
+            self.target.settimeout(3)
+            first_backend = self.target.recv(BUFLEN)
+        except (socket.timeout, OSError):
+            pass
+        finally:
+            try:
+                self.target.settimeout(None)
+            except OSError:
+                pass
+
+        try:
+            self.client.sendall(reply + first_backend)
+        except OSError:
+            pass
+
+        self.client_buffer = ''
         self.server.printLog(self.log)
         self.doCONNECT()
 
