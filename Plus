@@ -5,6 +5,40 @@ clear
     rm $HOME/Plus >/dev/null 2>&1
     exit 0
 }
+
+# ---------------------------------------------------------------
+# Auto-install mode
+# ---------------------------------------------------------------
+# Enables silent / unattended installation. Triggered by:
+#   * SSHPLUS_AUTO=1 in the environment
+#   * --auto or -y on the command line
+#   * stdin is not a TTY (piped install: curl … | bash)
+#
+# When enabled the script:
+#   * Skips the "GENERATE FREE KEY [Y/N]" prompt (defaults to Y)
+#   * Auto-detects the VPS architecture from `uname -m` so the user
+#     never has to pick [1] x86_64 vs [2] aarch64 by hand
+#   * Auto-confirms the "Keep current database" prompt with [1]
+# Interactive runs (real TTY, no flag, no env var) are unchanged —
+# the prompts still appear so a human can override the defaults.
+SSHPLUS_AUTO="${SSHPLUS_AUTO:-0}"
+for _arg in "$@"; do
+    case "$_arg" in
+        --auto|-y|--yes|--unattended) SSHPLUS_AUTO=1 ;;
+    esac
+done
+[[ ! -t 0 ]] && SSHPLUS_AUTO=1
+
+# Detect architecture once so both interactive and auto modes can use
+# it. Map every value uname -m might return on a Linux VPS onto the
+# script's [1]/[2] menu options.
+_uname_m=$(uname -m 2>/dev/null)
+case "$_uname_m" in
+    x86_64|amd64)          AUTO_ARCH=1 ; AUTO_ARCH_NAME="x86_64" ;;
+    aarch64|arm64|armv8*)  AUTO_ARCH=2 ; AUTO_ARCH_NAME="aarch64(ARM)" ;;
+    *)                     AUTO_ARCH="" ; AUTO_ARCH_NAME="$_uname_m" ;;
+esac
+
 # Force IPv4 + cap timeouts; most VPS images advertise AAAA but route only v4.
 cat >/etc/apt/apt.conf.d/99force-ipv4 <<'APT_CONF'
 Acquire::ForceIPv4 "true";
@@ -98,14 +132,48 @@ echo ""
 echo -e "\033[1;31m≠×≠×≠×≠×≠×≠×≠×[\033[1;33m • \033[1;32mEDIT:@MinaProNet\033[1;33m •\033[1;31m ]≠×≠×≠×≠×≠×≠×≠×\033[0m"
 echo ""
 #-----------------------------------------------------------------------------------------------------------------
-echo -ne "\033[1;36mGENERATE FREE KEY [Y/N]: \033[1;37m"
-read x
+if [[ "$SSHPLUS_AUTO" = "1" ]]; then
+    # Unattended install — show the prompts so the log is informative
+    # but answer them automatically. The architecture is taken from
+    # `uname -m` (detected above); if uname returned something this
+    # installer doesn't recognise, drop back to the interactive prompt
+    # rather than guessing wrong and downloading the binary build for
+    # the wrong CPU.
+    echo -e "\033[1;36mGENERATE FREE KEY [Y/N]: \033[1;37mY \033[1;32m(auto)\033[0m"
+    x="y"
+    if [[ -n "$AUTO_ARCH" ]]; then
+        echo -e "\033[1;36mSelect your VPS Architecture: \033[1;37m"
+        echo -e "[1] - x86_64"
+        echo -e "[2] - aarch64(ARM)"
+        echo -e "\033[1;36mOption: \033[1;37m${AUTO_ARCH} \033[1;32m(auto-detected: ${AUTO_ARCH_NAME})\033[0m"
+        resposta="$AUTO_ARCH"
+    else
+        echo -e "\033[1;33m  ⚠ Unknown CPU architecture '${AUTO_ARCH_NAME}' — falling back to manual selection.\033[0m"
+        echo -e "\033[1;36mSelect your VPS Architecture: \033[1;37m"
+        echo -e "[1] - x86_64"
+        echo -e "[2] - aarch64(ARM)"
+        echo -ne "\033[1;36mOption: \033[1;37m"
+        read resposta
+    fi
+else
+    echo -ne "\033[1;36mGENERATE FREE KEY [Y/N]: \033[1;37m"
+    read x
+    [[ $x = @(n|N) ]] && exit
+    echo -e "\033[1;36mSelect your VPS Architecture: \033[1;37m"
+    if [[ -n "$AUTO_ARCH" ]]; then
+        echo -e "[1] - x86_64$( [[ $AUTO_ARCH = 1 ]] && echo "  \033[1;32m← detected\033[1;37m" )"
+        echo -e "[2] - aarch64(ARM)$( [[ $AUTO_ARCH = 2 ]] && echo "  \033[1;32m← detected\033[1;37m" )"
+        echo -ne "\033[1;36mOption \033[1;33m[$AUTO_ARCH]\033[1;36m: \033[1;37m"
+        read resposta
+        [[ -z "$resposta" ]] && resposta="$AUTO_ARCH"
+    else
+        echo -e "[1] - x86_64"
+        echo -e "[2] - aarch64(ARM)"
+        echo -ne "\033[1;36mOption: \033[1;37m"
+        read resposta
+    fi
+fi
 [[ $x = @(n|N) ]] && exit
-echo -e "\033[1;36mSelect your VPS Architecture: \033[1;37m"
-echo -e "[1] - x86_64"
-echo -e "[2] - aarch64(ARM)"
-echo -ne "\033[1;36mOption: \033[1;37m"
-read resposta
 if [[ "$resposta" = '1' ]]; then
     sed -i 's/Port 22222/Port 22/g' /etc/ssh/sshd_config >/dev/null 2>&1
     service ssh restart >/dev/null 2>&1
@@ -153,7 +221,12 @@ if [[ "$resposta" = '1' ]]; then
         echo ""
         tput setaf 2
         tput bold
-        read -p "Option ?: " -e -i 1 optiondb
+        if [[ "$SSHPLUS_AUTO" = "1" ]]; then
+            optiondb=1
+            echo -e "Option ?: 1 \033[1;32m(auto — keeping existing database)\033[0m"
+        else
+            read -p "Option ?: " -e -i 1 optiondb
+        fi
         tput sgr0
     } || {
         awk -F : '$3 >= 500 { print $1 " 1" }' /etc/passwd | grep -v '^nobody' >$HOME/usuarios.db
@@ -280,7 +353,12 @@ elif [[ "$resposta" = '2' ]]; then
         echo ""
         tput setaf 2
         tput bold
-        read -p "Option ?: " -e -i 1 optiondb
+        if [[ "$SSHPLUS_AUTO" = "1" ]]; then
+            optiondb=1
+            echo -e "Option ?: 1 \033[1;32m(auto — keeping existing database)\033[0m"
+        else
+            read -p "Option ?: " -e -i 1 optiondb
+        fi
         tput sgr0
     } || {
         awk -F : '$3 >= 500 { print $1 " 1" }' /etc/passwd | grep -v '^nobody' >$HOME/usuarios.db
