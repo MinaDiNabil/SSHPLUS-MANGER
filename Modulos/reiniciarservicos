@@ -29,21 +29,7 @@ echo -ne "\033[1;33mREINICIANDO SQUID PROXY "; fun_prog 'service squid3 restart'
 echo ""
 sleep 1
 fi
-restart_sniproxy() {
-	# Stop the dynamic-SNI listeners and their multiplexers; cron's
-	# /etc/autostart respawns them within a minute, but we kick it
-	# manually to close the gap.
-	for s in $(screen -ls 2>/dev/null | grep -E '\.(sniproxy_|sslmux_)' | awk '{print $1}'); do
-		screen -S "$s" -X quit 2>/dev/null
-	done
-	sleep 1
-	[[ -x /etc/autostart ]] && /etc/autostart
-}
-if screen -ls 2>/dev/null | grep -q '\.sniproxy_'; then
-echo -ne "\033[1;33mREINICIANDO SSL TUNNEL "; fun_prog 'restart_sniproxy'
-echo ""
-sleep 1
-elif [[ -e /etc/stunnel/stunnel.conf ]]; then
+if [[ -e /etc/stunnel/stunnel.conf ]]; then
 echo -ne "\033[1;33mREINICIANDO SSL TUNNEL "; fun_prog 'service stunnel4 restart'
 echo ""
 sleep 1

@@ -17,7 +17,7 @@ BUFLEN = 8196 * 8
 TIMEOUT = 60
 MSG = 'ALERT'
 DEFAULT_HOST = '0.0.0.0:1194'
-RESPONSE = "HTTP/1.1 101 " + str(MSG) + "\r\n\r\n"
+RESPONSE = ("HTTP/1.1 101 " + str(MSG) + "\r\n\r\n").encode('utf-8')
 
 
 class Server(threading.Thread):
@@ -54,8 +54,9 @@ class Server(threading.Thread):
             self.soc.close()
 
     def printLog(self, log):
-        with self.logLock:
-            print(log)
+        self.logLock.acquire()
+        print(log)
+        self.logLock.release()
 
     def addConn(self, conn):
         try:
@@ -93,6 +94,7 @@ class ConnectionHandler(threading.Thread):
         self.client_buffer = ''
         self.server = server
         self.log = 'Conexao: ' + str(addr)
+        self.method = ''
 
     def close(self):
         try:
@@ -115,8 +117,7 @@ class ConnectionHandler(threading.Thread):
 
     def run(self):
         try:
-            raw = self.client.recv(BUFLEN)
-            self.client_buffer = raw.decode('utf-8', errors='ignore')
+            self.client_buffer = self.client.recv(BUFLEN).decode('utf-8', errors='replace')
 
             hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
 
@@ -128,22 +129,20 @@ class ConnectionHandler(threading.Thread):
             if split != '':
                 self.client.recv(BUFLEN)
 
-            passwd = self.findHeader(self.client_buffer, 'X-Pass')
+            if hostPort != '':
+                passwd = self.findHeader(self.client_buffer, 'X-Pass')
 
-            if len(PASS) != 0 and passwd == PASS:
-                self.method_CONNECT(hostPort)
-            elif len(PASS) != 0 and passwd != PASS:
-                self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
+                if len(PASS) != 0 and passwd == PASS:
+                    self.method_CONNECT(hostPort)
+                elif len(PASS) != 0 and passwd != PASS:
+                    self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
+                elif hostPort.startswith(IP):
+                    self.method_CONNECT(hostPort)
+                else:
+                    self.client.send(b'HTTP/1.1 403 Forbidden!\r\n\r\n')
             else:
-                # Mobile injectors routinely set X-Real-Host to the
-                # server's public IP or domain. Replying 403 there breaks
-                # the tunnel for every such client. Keep the proxy closed
-                # (no open-proxy abuse) by transparently rewriting any
-                # non-local target to DEFAULT_HOST instead of rejecting.
-                host_only = hostPort.split(':', 1)[0]
-                if host_only not in ('127.0.0.1', 'localhost', IP):
-                    hostPort = DEFAULT_HOST
-                self.method_CONNECT(hostPort)
+                print('- No X-Real-Host!')
+                self.client.send(b'HTTP/1.1 400 NoXRealHost!\r\n\r\n')
 
         except Exception as e:
             self.log += ' - error: ' + str(e)
@@ -153,16 +152,19 @@ class ConnectionHandler(threading.Thread):
             self.server.removeConn(self)
 
     def findHeader(self, head, header):
-        # Case-insensitive header lookup, tolerant of any whitespace
-        # between the colon and the value (real-world injectors lowercase
-        # header names and sometimes drop the space after the colon).
-        for line in head.split('\r\n'):
-            if ':' not in line:
-                continue
-            name, _, value = line.partition(':')
-            if name.strip().lower() == header.lower():
-                return value.strip()
-        return ''
+        aux = head.find(header + ': ')
+
+        if aux == -1:
+            return ''
+
+        aux = head.find(':', aux)
+        head = head[aux + 2:]
+        aux = head.find('\r\n')
+
+        if aux == -1:
+            return ''
+
+        return head[:aux]
 
     def connect_target(self, host):
         i = host.find(':')
@@ -170,7 +172,7 @@ class ConnectionHandler(threading.Thread):
             port = int(host[i + 1:])
             host = host[:i]
         else:
-            if getattr(self, 'method', '') == 'CONNECT':
+            if self.method == 'CONNECT':
                 port = 443
             else:
                 port = 22
@@ -182,9 +184,10 @@ class ConnectionHandler(threading.Thread):
         self.target.connect(address)
 
     def method_CONNECT(self, path):
+        self.method = 'CONNECT'
         self.log += ' - CONNECT ' + path
         self.connect_target(path)
-        self.client.sendall(RESPONSE.encode('utf-8'))
+        self.client.sendall(RESPONSE)
         self.client_buffer = ''
         self.server.printLog(self.log)
         self.doCONNECT()
@@ -223,10 +226,10 @@ class ConnectionHandler(threading.Thread):
 
 
 def main(host=IP, port=PORT):
-    print("\033[0;34m━" * 8, "\033[1;32m PROXY SOCKS", "\033[0;34m━" * 8, "\n")
+    print("\033[0;34m" + "━" * 8 + " \033[1;32mPROXY SOCKS\033[0;34m " + "━" * 8 + "\n")
     print("\033[1;33mIP:\033[1;32m " + IP)
     print("\033[1;33mPORTA:\033[1;32m " + str(PORT) + "\n")
-    print("\033[0;34m━" * 10, "\033[1;32m SSHPLUS", "\033[0;34m━\033[1;37m" * 11, "\n")
+    print("\033[0;34m" + "━" * 10 + " \033[1;32mSSHPLUS\033[0;34m " + "━\033[1;37m" * 11 + "\n")
     server = Server(IP, PORT)
     server.start()
     while True:

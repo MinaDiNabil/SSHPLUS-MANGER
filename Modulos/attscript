@@ -111,7 +111,10 @@ fun_force_update () {
 
   # Helper files that live in /etc/SSHPlus/ (not run from /bin/).
   mkdir -p /etc/SSHPlus 2>/dev/null
-  local _plus=(cabecalho bot open.py proxy.py wsproxy.py sniproxy.py)
+  local _plus=(cabecalho bot open.py proxy.py wsproxy.py)
+  # Remove any leftover sniproxy.py from older installs; SSL TUNNEL is
+  # back on stunnel4 with a static self-signed cert.
+  rm -f /etc/SSHPlus/sniproxy.py 2>/dev/null
   for _arq in "${_plus[@]}"; do
     if [[ -f "$src/Modulos/$_arq" ]]; then
       cp -f "$src/Modulos/$_arq" "/etc/SSHPlus/$_arq"
@@ -128,42 +131,25 @@ fun_force_update () {
   cd "$HOME"
   rm -rf "$tmpdir"
 
-  # Bootstrap the dynamic-SNI CA and migrate any legacy stunnel install
-  # to sniproxy. Old installs were shipping a static self-signed cert
-  # whose SAN had to match the user's domain *and* every bug-host SNI
-  # the injector might send — an endless game of whack-a-mole that's
-  # exactly what the dynamic listener gets rid of.
-  fun_migrate_to_sniproxy
-
-  # Patch the Squid HTTP proxy ACL. Old installs shipped a config that
-  # explicitly denied any destination domain other than the server's
-  # own IP and a tiny payload allow-list — so CONNECT requests to any
-  # bug host (paysecure.islamicbank.ps, *.gateway.mastercard.com,
-  # hcaptcha endpoints, ...) were rejected by Squid even when the SSH
-  # tunnel itself was healthy.
-  fun_fix_squid_acl
-
-  # Loop Squid's outbound CONNECTs back to the local sniproxy. Without
-  # this, every "CONNECT bug-host:443" from a mobile injector goes to
-  # bug-host's real public IP (Squid does its own DNS resolution and
-  # opens TCP to the resolved address) — so the tunnel never reaches
-  # the user's SSH backend even though Squid says "200 Connection
-  # established". This is the *actual* reason "works on the IP, fails
-  # on the domain" survived the previous round of sniproxy + Squid ACL
-  # fixes: those fixes ensure sniproxy sees the right cert and Squid
-  # stops refusing the CONNECT, but they don't stop Squid from leaving
-  # the box with the bytes.
-  fun_install_squid_loopback
-
-  # Stop legacy multiplexers (refreshed wsproxy.py takes effect on
-  # respawn) and any leftover stunnel service. /etc/autostart will
-  # re-spawn the sniproxy + sslmux pairs we just registered on the
-  # next cron tick, but invoking it manually closes the gap.
+  # Stop and clean up any sniproxy/sslmux screen sessions from older
+  # installs — SSL TUNNEL is now back on stunnel4.
   for s in $(screen -ls 2>/dev/null | grep -E '\.(sslmux_|sniproxy_)' | awk '{print $1}'); do
     screen -S "$s" -X quit 2>/dev/null
   done
-  service stunnel4 stop > /dev/null 2>&1
-  systemctl disable stunnel4 > /dev/null 2>&1
+  sed -i '/sniproxy\.py/d;/sslmux_.*python3/d' /etc/autostart 2>/dev/null
+
+  # Restart wsproxy/proxy/open screens so refreshed Python files take effect.
+  for s in $(screen -ls 2>/dev/null | grep -E '\.(ws[0-9]*|proxy|openpy)' | awk '{print $1}'); do
+    screen -S "$s" -X quit 2>/dev/null
+  done
+
+  # Make sure stunnel4 is running if its config exists.
+  if [[ -f /etc/stunnel/stunnel.conf && -s /etc/stunnel/stunnel.pem ]]; then
+    [[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+    systemctl enable stunnel4 >/dev/null 2>&1
+    service stunnel4 restart >/dev/null 2>&1
+  fi
+
   [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1
 
   touch /tmp/.sshplus_force_ok
