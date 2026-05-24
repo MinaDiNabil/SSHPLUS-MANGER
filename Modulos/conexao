@@ -958,31 +958,16 @@ LOOPBACK_EOF
 				ssl_conf() {
 					mkdir -p /etc/stunnel /var/run/stunnel4 /var/log/stunnel4
 					chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
+					# Simple, upstream-SSHPLUS-compatible stunnel.conf.
+					# No cipher/TLS-version restrictions — mobile injector
+					# configs and carrier DPI rely on stunnel negotiating
+					# whatever the client offers, and locking it down
+					# (TLS 1.2+ only, hand-picked ciphers) was breaking
+					# real-world connections.
 					cat >/etc/stunnel/stunnel.conf <<-STUNNEL_CONF
-						; SSHPlus SSL TUNNEL — stable configuration.
-						pid = /var/run/stunnel4/stunnel.pid
-						output = /var/log/stunnel4/stunnel.log
-						debug = 4
-						syslog = no
-
-						cert = /etc/stunnel/stunnel.pem
+						cert = /etc/stunnel/cert.pem
+						key = /etc/stunnel/key.pem
 						client = no
-
-						socket = a:SO_REUSEADDR=1
-						socket = a:SO_KEEPALIVE=1
-						socket = a:TCP_KEEPIDLE=60
-						socket = a:TCP_KEEPINTVL=15
-						socket = a:TCP_KEEPCNT=4
-						socket = l:TCP_NODELAY=1
-						socket = l:SO_KEEPALIVE=1
-						socket = r:TCP_NODELAY=1
-						socket = r:SO_KEEPALIVE=1
-
-						TIMEOUTbusy = 300
-						TIMEOUTclose = 0
-						TIMEOUTconnect = 30
-						TIMEOUTidle = 86400
-
 						[stunnel]
 						connect = 127.0.0.1:${portssl}
 						accept = ${porta}
@@ -992,14 +977,59 @@ LOOPBACK_EOF
 				echo -e "\n\033[1;32mCREATING CERTIFICATE!\033[0m"
 				echo ""
 				ssl_certif() {
-					if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
-						openssl genrsa -out /tmp/key.pem 2048 >/dev/null 2>&1
-						openssl req -new -x509 -key /tmp/key.pem -out /tmp/cert.pem -days 3650 -subj "/C=US/ST=NA/L=NA/O=SSHPlus/OU=SSHPlus/CN=sshplus.local" >/dev/null 2>&1
-						cat /tmp/cert.pem /tmp/key.pem >/etc/stunnel/stunnel.pem
-						rm -f /tmp/cert.pem /tmp/key.pem
+					# Prefer the bundled Let's Encrypt cert from the repo
+					# (Install/cert + Install/key). Mobile injectors and
+					# carrier anti-VPN DPI have years of "this signature
+					# looks legitimate" history with the upstream cert.
+					# Self-signed certs (CN=sshplus.local) trigger false
+					# positives on some carriers' VPN-detection rules.
+					_have_cert=0
+					if [[ -s /etc/stunnel/cert.pem && -s /etc/stunnel/key.pem ]]; then
+						_have_cert=1
 					fi
-					chown stunnel4:stunnel4 /etc/stunnel/stunnel.pem 2>/dev/null
-					chmod 600 /etc/stunnel/stunnel.pem
+					if [[ $_have_cert -eq 0 ]]; then
+						_repo_cert=""
+						_repo_key=""
+						for _src_dir in "$HOME/SSHPLUS-main/Install" "$HOME/SSHPLUS-MANGER-main/Install" "/tmp/SSHPLUS-main/Install" "/etc/SSHPlus"; do
+							if [[ -s "$_src_dir/cert" && -s "$_src_dir/key" ]]; then
+								_repo_cert="$_src_dir/cert"
+								_repo_key="$_src_dir/key"
+								break
+							fi
+						done
+						if [[ -z "$_repo_cert" ]] && command -v wget >/dev/null 2>&1; then
+							if wget -q --tries=2 --timeout=15 \
+									https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/cert \
+									-O /tmp/sshplus-cert 2>/dev/null && \
+							   wget -q --tries=2 --timeout=15 \
+									https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/key \
+									-O /tmp/sshplus-key 2>/dev/null && \
+							   [[ -s /tmp/sshplus-cert && -s /tmp/sshplus-key ]]; then
+								_repo_cert=/tmp/sshplus-cert
+								_repo_key=/tmp/sshplus-key
+							fi
+						fi
+						if [[ -n "$_repo_cert" && -n "$_repo_key" ]]; then
+							install -m 644 "$_repo_cert" /etc/stunnel/cert.pem
+							install -m 600 "$_repo_key"  /etc/stunnel/key.pem
+							_have_cert=1
+							[[ -f /tmp/sshplus-cert ]] && rm -f /tmp/sshplus-cert /tmp/sshplus-key
+						fi
+					fi
+					if [[ $_have_cert -eq 0 ]]; then
+						# Last-resort fallback: generate self-signed.
+						openssl genrsa -out /etc/stunnel/key.pem 2048 >/dev/null 2>&1
+						openssl req -new -x509 -key /etc/stunnel/key.pem \
+							-out /etc/stunnel/cert.pem -days 3650 \
+							-subj "/C=US/ST=NA/L=NA/O=SSHPlus/OU=SSHPlus/CN=sshplus.local" >/dev/null 2>&1
+					fi
+					# Keep stunnel.pem (concatenated cert+key) in sync for
+					# any drop-in or migration script that still references
+					# the single-file form.
+					cat /etc/stunnel/cert.pem /etc/stunnel/key.pem >/etc/stunnel/stunnel.pem
+					chown stunnel4:stunnel4 /etc/stunnel/cert.pem /etc/stunnel/key.pem /etc/stunnel/stunnel.pem 2>/dev/null
+					chmod 644 /etc/stunnel/cert.pem
+					chmod 600 /etc/stunnel/key.pem /etc/stunnel/stunnel.pem
 					[[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/g' /etc/default/stunnel4
 					systemctl enable stunnel4 >/dev/null 2>&1
 					systemctl daemon-reload >/dev/null 2>&1
