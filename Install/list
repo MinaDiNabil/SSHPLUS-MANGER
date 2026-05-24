@@ -531,74 +531,119 @@ echo ""
 echo -e "\033[1;33m[1/8] Installing BadVPN (port 7300)...\033[0m"
 cd $HOME
 
-# Two-track install:
-#   1. Debian/Ubuntu `badvpn` package — works on EVERY supported
-#      architecture (x86_64, aarch64, armv7, …) and uses signed,
-#      distro-maintained binaries. This is the canonical answer.
-#   2. Fall back to downloading our pre-built x86_64 binary from
-#      the repo only when apt-install failed AND the host is x86_64.
+# Three-track install. Tries each in order, stops at first that
+# produces a working udpgw binary. "Working" = ELF executable AND
+# `--help` prints "--listen-addr" (i.e. not the protected wrapper
+# that exits silently after a license check).
 #
-# The previous version skipped apt entirely and went straight to
-# wget — which silently produced a 404 HTML page on flaky networks
-# and broke BadVPN on every non-x86_64 host.
+#  1. apt-get install -y badvpn         — Debian 10/11, Ubuntu 18/20
+#  2. Build from source via cmake       — works on EVERY arch + OS
+#  3. wget pre-built binary from repo   — x86_64 only, LAST resort
+#     (the upstream binary has an anti-debug + licence-check wrapper
+#     that exits silently if /usr/lib/licence isn't exactly right;
+#     prefer the clean alternatives above)
 _bv_installed=0
 _bv_arch=$(uname -m 2>/dev/null)
+_bv_bin=""
 
-if command -v apt-get >/dev/null 2>&1; then
+# Helper: did the binary at $1 actually print real udpgw help?
+_bv_is_real_udpgw() {
+	[[ -x "$1" ]] || return 1
+	head -c 4 "$1" 2>/dev/null | grep -q $'\x7fELF' || return 1
+	"$1" --help 2>&1 | head -30 | grep -q -- '--listen-addr'
+}
+
+# Attempt 1: apt package.
+if [[ $_bv_installed -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
 	DEBIAN_FRONTEND=noninteractive apt-get install -y badvpn >/dev/null 2>&1
-	if [[ -x /usr/bin/badvpn-udpgw ]] && head -c 4 /usr/bin/badvpn-udpgw 2>/dev/null | grep -q $'\x7fELF'; then
-		# Symlink to /bin/badvpn-udpgw so autostart entries and
-		# Sistema/badvpn that hard-code the /bin path keep working.
+	if _bv_is_real_udpgw /usr/bin/badvpn-udpgw; then
 		ln -sf /usr/bin/badvpn-udpgw /bin/badvpn-udpgw 2>/dev/null
+		_bv_bin=/usr/bin/badvpn-udpgw
 		_bv_installed=1
-		echo -e "\033[1;32m   ✓ BadVPN installed via apt (Debian/Ubuntu package)\033[0m"
+		echo -e "\033[1;32m   ✓ BadVPN installed via apt\033[0m"
 	fi
 fi
 
-# x86_64 fallback only — non-x86_64 hosts where apt-install failed
-# need a native-arch binary, and our repo only ships x86_64.
+# Attempt 2: build from source. Heaviest but most reliable.
+if [[ $_bv_installed -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+	echo -e "\033[1;36m   ⚙ Building BadVPN from source (1-3 min)...\033[0m"
+	DEBIAN_FRONTEND=noninteractive apt-get install -y \
+		cmake build-essential libnspr4-dev libnss3-dev libssl-dev \
+		wget tar >/dev/null 2>&1
+	_bv_build="/tmp/sshplus-badvpn-build.$$"
+	rm -rf "$_bv_build"
+	mkdir -p "$_bv_build"
+	(
+		set -e
+		cd "$_bv_build"
+		wget -q --tries=3 --timeout=30 \
+			https://github.com/ambrop72/badvpn/archive/refs/tags/1.999.130.tar.gz \
+			-O badvpn.tar.gz
+		tar -xzf badvpn.tar.gz
+		cd badvpn-*/
+		mkdir build && cd build
+		cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 >/dev/null 2>&1
+		make -j"$(nproc 2>/dev/null || echo 1)" >/dev/null 2>&1
+		install -m 755 udpgw/badvpn-udpgw /usr/local/bin/badvpn-udpgw
+	) >/dev/null 2>&1
+	rm -rf "$_bv_build"
+	if _bv_is_real_udpgw /usr/local/bin/badvpn-udpgw; then
+		ln -sf /usr/local/bin/badvpn-udpgw /bin/badvpn-udpgw 2>/dev/null
+		_bv_bin=/usr/local/bin/badvpn-udpgw
+		_bv_installed=1
+		echo -e "\033[1;32m   ✓ BadVPN built from source ($_bv_arch)\033[0m"
+	fi
+fi
+
+# Attempt 3: x86_64 pre-built wrapper from the repo. Last resort.
+# The upstream binary carries an anti-debug + licence-check wrapper
+# that exits silently if /usr/lib/licence isn't right — make sure
+# the licence file exists before we install the wrapper.
 if [[ $_bv_installed -eq 0 && ( "$_bv_arch" = "x86_64" || "$_bv_arch" = "amd64" ) ]]; then
+	[[ -s /usr/lib/licence ]] || echo 'by: @KIRITO_SSH' > /usr/lib/licence
 	wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/badvpn -O /bin/badvpn-udpgw.tmp
 	if head -c 4 /bin/badvpn-udpgw.tmp 2>/dev/null | grep -q $'\x7fELF'; then
 		install -m 755 /bin/badvpn-udpgw.tmp /bin/badvpn-udpgw
 		rm -f /bin/badvpn-udpgw.tmp
+		_bv_bin=/bin/badvpn-udpgw
 		_bv_installed=1
-		echo -e "\033[1;32m   ✓ BadVPN installed from repo (x86_64 fallback)\033[0m"
+		echo -e "\033[1;33m   ⚠ BadVPN installed via repo wrapper (last resort)\033[0m"
 	else
 		rm -f /bin/badvpn-udpgw.tmp
 	fi
 fi
 
 if [[ $_bv_installed -eq 0 ]]; then
-	echo -e "\033[1;31m   ✗ BadVPN install failed (apt + wget both failed).\033[0m"
-	echo -e "\033[1;33m     Architecture: $_bv_arch — only x86_64 has a repo fallback.\033[0m"
+	echo -e "\033[1;31m   ✗ BadVPN install failed (apt + source build + wget all failed).\033[0m"
+	echo -e "\033[1;33m     Architecture: $_bv_arch\033[0m"
 elif ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
 	echo -e "\033[1;33m   ⚠ Port 7300/udp already in use. BadVPN not started.\033[0m"
 else
-	# BadVPN args matching the upstream-tested defaults. The previous
-	# `--max-clients 1000000` looked impressive but made the daemon
-	# try to allocate ~500 MB of slot tables at startup — on most
-	# VPS this OOMed instantly and the screen session vanished one
-	# second after spawn, leaving the menu's status check reporting
-	# "○" forever. 10000 clients is the realistic per-host ceiling
-	# for any reasonable VPS and matches the original SSHPLUS args.
-	screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000
-	# Strip every previous BadVPN autostart line so we never end up
-	# with two entries fighting for port 7300 (the old `1000000`
-	# line + the new `10000` line both racing every cron tick).
+	# Minimal args — no --client-socket-sndbuf because some upstream
+	# builds don't recognise it and refuse to start. The defaults are
+	# more than adequate for normal mobile-VPN UDP traffic.
+	_bv_cmd="$_bv_bin --listen-addr 127.0.0.1:7300 --max-clients 1000 --max-connections-for-client 10"
+	screen -dmS udpvpn bash -c "exec $_bv_cmd 2>>/var/log/badvpn-udpvpn.log"
+	# Strip every previous BadVPN autostart line so we don't end up
+	# with multiple entries racing for port 7300.
 	sed -i '/badvpn-udpgw.*--listen-addr 127\.0\.0\.1:7300/d' /etc/autostart 2>/dev/null
 	sed -i '/udpvpn/d' /etc/autostart 2>/dev/null
-	echo "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000" >> /etc/autostart
+	echo "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn bash -c 'exec $_bv_cmd 2>>/var/log/badvpn-udpvpn.log'" >> /etc/autostart
 
-	sleep 1
+	sleep 2
 	if ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
-		echo -e "\033[1;32m   ✓ BadVPN listening on 127.0.0.1:7300\033[0m"
+		echo -e "\033[1;32m   ✓ BadVPN listening on 127.0.0.1:7300 ($_bv_bin)\033[0m"
 	else
 		echo -e "\033[1;31m   ✗ BadVPN started but is not listening on 7300/udp.\033[0m"
+		if [[ -s /var/log/badvpn-udpvpn.log ]]; then
+			echo -e "\033[1;33m     Last lines of /var/log/badvpn-udpvpn.log:\033[0m"
+			tail -n 3 /var/log/badvpn-udpvpn.log 2>/dev/null | sed 's/^/       /'
+		fi
 		echo -e "\033[1;33m     Inspect with: screen -r udpvpn  (Ctrl+A,D to detach)\033[0m"
 	fi
 fi
-unset _bv_installed _bv_arch
+unset _bv_installed _bv_arch _bv_bin _bv_cmd _bv_build
+unset -f _bv_is_real_udpgw 2>/dev/null
 
 # 2. Install Squid Proxy on port 3128
 echo -e "\033[1;33m[2/8] Installing Squid Proxy (port 3128)...\033[0m"
