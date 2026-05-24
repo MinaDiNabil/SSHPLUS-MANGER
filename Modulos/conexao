@@ -936,33 +936,31 @@ LOOPBACK_EOF
 				echo -e "\n\033[1;32mCONFIGURING SSL TUNNEL!\033[0m"
 				echo ""
 
-				# Start the wsproxy multiplexer if it isn't already on 700.
-				# Backend is dropbear:110 because OpenSSH's KEXINIT is too
-				# large for Cloudflare WebSocket fragmentation — see the
-				# topology block in Install/list section 4.
+				# Start the wsproxy multiplexer if it isn't already on
+				# 127.0.0.1:700. Backend is OpenSSH:22 (matches upstream
+				# SSHPLUS), with automatic fallback to dropbear 110/143
+				# via wsproxy.py's SSH_FALLBACK_PORTS — see Install/list
+				# section [4/8] for full rationale on the backend choice.
 				start_sslmux() {
-					# Kill any sslmux still pointing at the legacy port-22
-					# backend BEFORE the listener check. Without this, the
-					# previous version would strip the autostart entry but
-					# leave the in-memory daemon running on :700 with the
-					# wrong backend, then the ss check would see :700 was
-					# already bound and silently skip spawning the new
-					# :700→:110 instance — defeating the whole migration.
-					if pgrep -af 'wsproxy\.py 700 22' >/dev/null 2>&1; then
-						for s in $(screen -ls 2>/dev/null | grep '\.sslmux' | awk '{print $1}'); do
-							screen -S "$s" -X quit 2>/dev/null
-						done
-						screen -wipe >/dev/null 2>&1
-						# Also kill any bare python process matching the legacy backend
-						pkill -f 'wsproxy\.py 700 22' >/dev/null 2>&1
-						sleep 1
-					fi
-					sed -i '/wsproxy\.py 700 22/d' /etc/autostart 2>/dev/null
+					# Kill any wsproxy still bound to :700 with a stale
+					# backend port (an earlier revision routed through
+					# dropbear:110, which produced 60-second SSH connect
+					# timeouts on some configurations). Match ANY backend
+					# port — the new spawn below pins it to 22 cleanly.
+					for s in $(screen -ls 2>/dev/null | grep -E '\.sslmux(_[0-9]+)?$' | awk '{print $1}'); do
+						screen -S "$s" -X quit 2>/dev/null
+					done
+					screen -wipe >/dev/null 2>&1
+					pkill -f 'wsproxy\.py 700 ' >/dev/null 2>&1
+					sleep 1
+					# Strip every legacy autostart entry so only the
+					# OpenSSH:22 spawn remains.
+					sed -i '/wsproxy\.py 700 /d' /etc/autostart 2>/dev/null
 					if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-						screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1
+						screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'
 					fi
-					if ! grep -q 'wsproxy.py 700 110' /etc/autostart 2>/dev/null; then
-						echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110" >>/etc/autostart
+					if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
+						echo "screen -ls 2>/dev/null | grep -qE '\.sslmux([[:space:]]|\$)' || screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'" >>/etc/autostart
 					fi
 				}
 				fun_bar 'start_sslmux'

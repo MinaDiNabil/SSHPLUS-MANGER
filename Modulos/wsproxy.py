@@ -18,12 +18,35 @@ try:
     LISTENING_PORT = int(sys.argv[1])
 except (IndexError, ValueError):
     LISTENING_PORT = 80
-# Optional second positional argument is the backend SSH port. Defaults
-# to 22 to match the original SSHPLUS behaviour.
+# Optional second positional argument is the backend SSH port.
+# Defaults to 22 (OpenSSH) to match upstream SSHPLUS behaviour —
+# OpenSSH is always present on a Debian/Ubuntu install and is the
+# most battle-tested SSH server, so it's the safest backend even
+# when dropbear is also running on a different port.
 try:
     SSH_PORT = int(sys.argv[2])
 except (IndexError, ValueError):
     SSH_PORT = 22
+# Fallback ports tried IN ORDER when the primary backend doesn't
+# accept the connection (e.g. service restart in progress, dropbear
+# crashed but cron-watchdog hasn't respawned it yet, OOM killed the
+# main SSH daemon). The mobile injector's SSH stage uses a 60-90s
+# connect timeout and won't retry once it expires, so a transient
+# backend hiccup turns into a hard "connect timeout expired" error
+# for the user — the fallback turns the same hiccup into a sub-
+# second retry against a different SSH server on the same host.
+#
+# Order: OpenSSH:22 → Dropbear:110 → Dropbear extra:143.
+# OpenSSH first because it has the largest concurrent-session
+# capacity by default; dropbear ports next because they share the
+# same user database via PAM and serve as warm spares.
+SSH_FALLBACK_PORTS = [22, 110, 143]
+# Per-candidate TCP connect timeout. The Linux default of ~75s
+# would mean the WHOLE fallback chain takes ~5 minutes if every
+# backend is dead, by which time the mobile client has long given
+# up. 5s catches a wedged backend fast and leaves time for the
+# fallback chain to find a live one within the client's timeout.
+SSH_CONNECT_TIMEOUT = 5
 BUFLEN = 4096 * 4
 TIMEOUT = 60
 MSG = ''
@@ -293,16 +316,53 @@ class ConnectionHandler(threading.Thread):
             else:
                 port = 80
 
-        (soc_family, soc_type, proto, _, address) = socket.getaddrinfo(host, port)[0]
+        # SSH-fallback resolver. If the requested backend doesn't
+        # accept the connection or doesn't send any data within
+        # SSH_FALLBACK_PROBE seconds (which is how the original
+        # SSHPLUS Payload-SSL bug manifested when stunnel was wired
+        # to a backend SSH daemon that wasn't listening on the
+        # expected port), transparently try each fallback port in
+        # order. The fallback list is populated only when this
+        # process is the SSL-TUNNEL multiplexer (host = 127.0.0.1
+        # AND port matches the configured SSH_PORT) — never when an
+        # explicit X-Real-Host header forwards us somewhere else.
+        candidates = [(host, port)]
+        if host in ('127.0.0.1', 'localhost') and port == SSH_PORT:
+            for fb in SSH_FALLBACK_PORTS:
+                if fb != port:
+                    candidates.append((host, fb))
 
-        self.target = socket.socket(soc_family, soc_type, proto)
-        self.target.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        try:
-            self.target.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except (AttributeError, OSError):
-            pass
-        self.targetClosed = False
-        self.target.connect(address)
+        last_err = None
+        for cand_host, cand_port in candidates:
+            try:
+                (soc_family, soc_type, proto, _, address) = socket.getaddrinfo(cand_host, cand_port, socket.AF_INET, socket.SOCK_STREAM)[0]
+                self.target = socket.socket(soc_family, soc_type, proto)
+                self.target.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                try:
+                    self.target.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except (AttributeError, OSError):
+                    pass
+                # Brief connect timeout so a wedged backend can't
+                # block this whole worker for the full TCP retry
+                # window (default 75s on Linux). After connect we
+                # restore blocking mode for the relay loop.
+                self.target.settimeout(SSH_CONNECT_TIMEOUT)
+                self.target.connect(address)
+                self.target.settimeout(None)
+                self.targetClosed = False
+                if cand_port != port:
+                    self.log += ' [fallback %s:%d]' % (cand_host, cand_port)
+                return
+            except (OSError, socket.timeout) as e:
+                last_err = e
+                try:
+                    self.target.close()
+                except Exception:
+                    pass
+                self.target = None
+        # All candidates failed — re-raise the last error so the
+        # outer handler can log and close the client.
+        raise last_err if last_err else OSError('no SSH backend reachable')
 
     def method_CONNECT(self, path, reply=RESPONSE):
         self.method = 'CONNECT'
