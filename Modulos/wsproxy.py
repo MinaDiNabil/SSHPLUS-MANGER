@@ -1,5 +1,28 @@
 #!/usr/bin/env python3
 # encoding: utf-8
+#
+# WS proxy — Python 3 port of upstream SSHPLUS wsproxy.py with
+# minimal-impact stability fixes. Deliberately keeps the original's
+# HTTP response format, header handling, and relay semantics so
+# mobile-injector configs (MinaProNet VPN, HTTP Custom, HTTP Injector,
+# etc.) trained on the upstream behaviour work unchanged.
+#
+# Differences from upstream worth knowing about:
+#  - Python 3 syntax (print(), bytes literals, etc.) — language port
+#    only, no behaviour change vs. the Python 2 original.
+#  - printLog is a no-op in production. The upstream version held a
+#    process-wide Lock around print() into a screen pty; under load
+#    the pty's scrollback buffer could fill and the print() would
+#    block indefinitely, deadlocking every handler thread. Toggle
+#    with WSPROXY_DEBUG_LOG=1 in the env if you need to debug.
+#  - SO_REUSEPORT is set when supported so multiple wsproxy instances
+#    can share a bind and the kernel load-balances accept() across
+#    them. Harmless single-instance no-op when only one is running.
+#  - Optional argv[2] = backend SSH port. Defaults to 22 (matches
+#    upstream's hardcoded DEFAULT_HOST). Lets the conexao "WebSocket"
+#    install path pin the backend explicitly when the user has
+#    multiple SSH daemons running.
+
 import socket
 import threading
 import select
@@ -8,8 +31,6 @@ import time
 import os
 import getopt
 
-# Production toggle: set WSPROXY_DEBUG_LOG=1 in env to re-enable the
-# per-connection print() that used to deadlock under load.
 WSPROXY_DEBUG_LOG = os.environ.get('WSPROXY_DEBUG_LOG', '0') == '1'
 
 PASS = ''
@@ -18,76 +39,27 @@ try:
     LISTENING_PORT = int(sys.argv[1])
 except (IndexError, ValueError):
     LISTENING_PORT = 80
-# Optional second positional argument is the backend SSH port.
-# Defaults to 22 (OpenSSH) to match upstream SSHPLUS behaviour —
-# OpenSSH is always present on a Debian/Ubuntu install and is the
-# most battle-tested SSH server, so it's the safest backend even
-# when dropbear is also running on a different port.
+
+# Optional backend SSH port. Defaults to 22 to match upstream.
 try:
     SSH_PORT = int(sys.argv[2])
 except (IndexError, ValueError):
     SSH_PORT = 22
-# Fallback ports tried IN ORDER when the primary backend doesn't
-# accept the connection (e.g. service restart in progress, dropbear
-# crashed but cron-watchdog hasn't respawned it yet, OOM killed the
-# main SSH daemon). The mobile injector's SSH stage uses a 60-90s
-# connect timeout and won't retry once it expires, so a transient
-# backend hiccup turns into a hard "connect timeout expired" error
-# for the user — the fallback turns the same hiccup into a sub-
-# second retry against a different SSH server on the same host.
-#
-# Order: OpenSSH:22 → Dropbear:110 → Dropbear extra:143.
-# OpenSSH first because it has the largest concurrent-session
-# capacity by default; dropbear ports next because they share the
-# same user database via PAM and serve as warm spares.
-SSH_FALLBACK_PORTS = [22, 110, 143]
-# Per-candidate TCP connect timeout. The Linux default of ~75s
-# would mean the WHOLE fallback chain takes ~5 minutes if every
-# backend is dead, by which time the mobile client has long given
-# up. 5s catches a wedged backend fast and leaves time for the
-# fallback chain to find a live one within the client's timeout.
-SSH_CONNECT_TIMEOUT = 5
+
 BUFLEN = 4096 * 4
 TIMEOUT = 60
 MSG = ''
 COR = '<font color="null">'
 FTAG = '</font>'
 DEFAULT_HOST = "127.0.0.1:" + str(SSH_PORT)
-# Reply that mobile injectors (MinaProNet, HTTP Custom, HTTP Injector,
-# ...) recognise as their canonical "proxy CONNECT succeeded" string
-# AND match case-sensitively against to decide whether to substitute.
-#
-# The injector's Proxy stage:
-#   1. reads up to \r\n\r\n from the wire,
-#   2. case-sensitively compares against
-#      "HTTP/1.0 200 Connection Established\r\n\r\n",
-#   3. if they match it consumes those bytes and lets the SSH stage
-#      read the next bytes — i.e. the SSH banner;
-#   4. if they don't match (different code, different wording, lower
-#      case "e" instead of "E"), the bytes stay on the wire and the
-#      SSH stage interprets them as its first packet header. That is
-#      why every earlier attempt produced "Illegal packet size!":
-#        - HTTP/1.1 101 <font ...>  →  bytes "HTTP" decoded as length
-#          1213486160 (= 0x48545450) once the substitution mismatch
-#          happens.
-#        - HTTP/1.0 200 Connection established (lowercase 'e')  →
-#          same failure, because "established" != "Established".
-#
-# Sending the EXACT 41-byte canonical reply makes the Proxy stage
-# happy and lets the SSH stage start reading on the SSH banner.
-RESPONSE = b"HTTP/1.0 200 Connection Established\r\n\r\n"
-RESPONSE_WS = RESPONSE
-RESPONSE_CONNECT = RESPONSE
 
-# HTTP request lines we recognise as a payload-style handshake. Any
-# other first-byte pattern (SSH-2.0, a TLS ClientHello byte 0x16, raw
-# binary) is treated as a raw stream and forwarded straight to the
-# SSH backend without an HTTP reply — that is what makes a single
-# listener able to terminate Standard SSL TUNNEL (raw SSH inside TLS)
-# AND WebSocket SSL Payload (HTTP CONNECT/GET inside TLS) on the same
-# port.
-HTTP_METHODS = (b'GET ', b'POST ', b'HEAD ', b'CONNECT ', b'PUT ',
-                b'OPTIONS ', b'DELETE ', b'TRACE ', b'PATCH ')
+# The EXACT canonical response that upstream SSHPLUS has shipped for
+# years. Mobile injectors detect WebSocket / proxy tunnels by matching
+# against this byte sequence — anything else (HTTP/1.0 200 Connection
+# Established, HTTP/1.1 200 OK, ...) makes injectors think the
+# handshake failed and they either retry forever or kill the SSH
+# stage with a connect timeout.
+RESPONSE = ("HTTP/1.1 101 " + COR + MSG + FTAG + "\r\n\r\n").encode('utf-8')
 
 
 class Server(threading.Thread):
@@ -103,23 +75,16 @@ class Server(threading.Thread):
     def run(self):
         self.soc = socket.socket(socket.AF_INET)
         self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        # SO_REUSEPORT lets multiple wsproxy instances share the same
-        # bind() so the kernel load-balances accept() across processes
-        # — required for 1M+ user installations where a single Python
-        # thread-per-connection process tops out around 5K concurrent.
+        # Optional SO_REUSEPORT for kernel-side accept() load-balancing
+        # across multiple wsproxy instances bound to the same port.
+        # Harmless single-instance no-op.
         try:
             self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except (AttributeError, OSError):
             pass
         self.soc.settimeout(2)
         self.soc.bind((self.host, self.port))
-        # Listen backlog matches net.core.somaxconn from the install
-        # tuning. The previous value of 128 capped burst arrival at
-        # ~128 SYN-ACK'd connections per second, which manifested as
-        # "connection refused" spikes whenever 1K+ users reconnected
-        # together after a brief upstream blip.
-        self.soc.listen(65535)
+        self.soc.listen(0)
         self.running = True
 
         try:
@@ -127,18 +92,10 @@ class Server(threading.Thread):
                 try:
                     c, addr = self.soc.accept()
                     c.setblocking(1)
-                    c.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                    try:
-                        c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    except (AttributeError, OSError):
-                        pass
                 except socket.timeout:
-                    continue
-                except OSError:
                     continue
 
                 conn = ConnectionHandler(c, self, addr)
-                conn.daemon = True
                 conn.start()
                 self.addConn(conn)
         finally:
@@ -146,21 +103,14 @@ class Server(threading.Thread):
             self.soc.close()
 
     def printLog(self, log):
-        # No-op in production. At 5K+ connections/sec, holding a global
-        # lock and calling print() into a possibly-detached screen pty
-        # was the dominant GIL serialisation point in this process —
-        # and could deadlock every worker thread if the screen pty
-        # buffer filled up. The log content is debug-only and is not
-        # consumed by anything in the management toolkit. Toggle by
-        # setting environment variable WSPROXY_DEBUG_LOG=1 if needed.
+        # Production no-op — see module docstring. Set WSPROXY_DEBUG_LOG=1
+        # in env to re-enable for live debugging.
         if WSPROXY_DEBUG_LOG:
-            self.logLock.acquire()
-            try:
-                print(log, flush=True)
-            except (OSError, BlockingIOError):
-                pass
-            finally:
-                self.logLock.release()
+            with self.logLock:
+                try:
+                    print(log, flush=True)
+                except (OSError, BlockingIOError):
+                    pass
 
     def addConn(self, conn):
         try:
@@ -173,8 +123,7 @@ class Server(threading.Thread):
     def removeConn(self, conn):
         try:
             self.threadsLock.acquire()
-            if conn in self.threads:
-                self.threads.remove(conn)
+            self.threads.remove(conn)
         finally:
             self.threadsLock.release()
 
@@ -195,10 +144,9 @@ class ConnectionHandler(threading.Thread):
         self.clientClosed = False
         self.targetClosed = True
         self.client = socClient
-        self.client_buffer = ''
+        self.client_buffer = b''
         self.server = server
         self.log = 'Connection: ' + str(addr)
-        self.method = ''
 
     def close(self):
         try:
@@ -221,67 +169,32 @@ class ConnectionHandler(threading.Thread):
 
     def run(self):
         try:
-            # Peek at the first bytes from the client and pick the
-            # right tunneling mode:
-            #
-            #   first bytes              | mode               | reply
-            #   -------------------------+--------------------+--------------------
-            #   CONNECT host:port ...    | WS SSL+Payload+    | "HTTP/1.0 200
-            #                            | Proxy              |  Connection
-            #                            |                    |  Established\r\n\r\n"
-            #   GET / POST / HEAD / ...  | WS SSL+Payload     | same as above
-            #                            |                    | (injector still
-            #                            |                    |  expects an HTTP
-            #                            |                    |  response and
-            #                            |                    |  consumes it before
-            #                            |                    |  SSH stage starts)
-            #   SSH-2.0-... / raw TLS    | Standard SSL TUNNEL| no reply, forward
-            #                            | (raw SSH-in-TLS)   | first chunk as-is
-            #
-            # Why the EXACT phrase
-            # "HTTP/1.0 200 Connection Established\r\n\r\n" matters:
-            # the injector's Proxy stage does a CASE-SENSITIVE match
-            # against this string. If the reply matches verbatim, the
-            # Proxy stage consumes those 41 bytes off the wire and
-            # the SSH stage starts reading at the SSH banner. If the
-            # reply differs by even one character (lower-case 'e' in
-            # "established", or "HTTP/1.1 101 ..." instead of 200),
-            # the bytes stay on the wire, the SSH stage decodes them
-            # as a packet header, and we get
-            # "Illegal packet size!" with whatever 4 bytes were at
-            # the start of our reply (1213486160 = "HTTP",
-            # 1231976033 = "Ih=!", etc.).
-            first_chunk = self.client.recv(BUFLEN)
-            if not first_chunk:
-                return
+            self.client_buffer = self.client.recv(BUFLEN)
 
-            is_http = any(first_chunk.startswith(m) for m in HTTP_METHODS)
+            hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
 
-            if is_http:
-                self.client_buffer = first_chunk.decode('utf-8', errors='replace')
+            if hostPort == '':
+                hostPort = DEFAULT_HOST
 
-                hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
-                if hostPort == '':
-                    hostPort = DEFAULT_HOST
+            split = self.findHeader(self.client_buffer, 'X-Split')
 
-                split = self.findHeader(self.client_buffer, 'X-Split')
-                if split != '':
-                    self.client.recv(BUFLEN)
+            if split != '':
+                self.client.recv(BUFLEN)
 
+            if hostPort != '':
                 passwd = self.findHeader(self.client_buffer, 'X-Pass')
-                if len(PASS) != 0 and passwd != PASS:
+
+                if len(PASS) != 0 and passwd == PASS:
+                    self.method_CONNECT(hostPort)
+                elif len(PASS) != 0 and passwd != PASS:
                     self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
+                elif hostPort.startswith('127.0.0.1') or hostPort.startswith('localhost'):
+                    self.method_CONNECT(hostPort)
                 else:
-                    self.method_CONNECT(hostPort, RESPONSE)
+                    self.client.send(b'HTTP/1.1 403 Forbidden!\r\n\r\n')
             else:
-                # Raw stream — forward to SSH without an HTTP reply.
-                self.method = 'TUNNEL'
-                self.log += ' - RAW ' + DEFAULT_HOST
-                self.connect_target(DEFAULT_HOST)
-                self.target.sendall(first_chunk)
-                self.client_buffer = ''
-                self.server.printLog(self.log)
-                self.doCONNECT()
+                self.server.printLog('- No X-Real-Host!')
+                self.client.send(b'HTTP/1.1 400 NoXRealHost!\r\n\r\n')
 
         except Exception as e:
             self.log += ' - error: ' + str(e)
@@ -291,6 +204,14 @@ class ConnectionHandler(threading.Thread):
             self.server.removeConn(self)
 
     def findHeader(self, head, header):
+        # head is bytes in Py3; decode lazily so we keep the bytes path
+        # everywhere except this single header-search helper.
+        if isinstance(head, bytes):
+            try:
+                head = head.decode('utf-8', errors='replace')
+            except Exception:
+                return ''
+
         aux = head.find(header + ': ')
 
         if aux == -1:
@@ -311,78 +232,25 @@ class ConnectionHandler(threading.Thread):
             port = int(host[i + 1:])
             host = host[:i]
         else:
-            if self.method == 'CONNECT':
+            if getattr(self, 'method', '') == 'CONNECT':
                 port = 443
             else:
                 port = 80
 
-        # SSH-fallback resolver. If the requested backend doesn't
-        # accept the connection or doesn't send any data within
-        # SSH_FALLBACK_PROBE seconds (which is how the original
-        # SSHPLUS Payload-SSL bug manifested when stunnel was wired
-        # to a backend SSH daemon that wasn't listening on the
-        # expected port), transparently try each fallback port in
-        # order. The fallback list is populated only when this
-        # process is the SSL-TUNNEL multiplexer (host = 127.0.0.1
-        # AND port matches the configured SSH_PORT) — never when an
-        # explicit X-Real-Host header forwards us somewhere else.
-        candidates = [(host, port)]
-        if host in ('127.0.0.1', 'localhost') and port == SSH_PORT:
-            for fb in SSH_FALLBACK_PORTS:
-                if fb != port:
-                    candidates.append((host, fb))
+        (soc_family, soc_type, proto, _, address) = socket.getaddrinfo(host, port)[0]
 
-        last_err = None
-        for cand_host, cand_port in candidates:
-            try:
-                (soc_family, soc_type, proto, _, address) = socket.getaddrinfo(cand_host, cand_port, socket.AF_INET, socket.SOCK_STREAM)[0]
-                self.target = socket.socket(soc_family, soc_type, proto)
-                self.target.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                try:
-                    self.target.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                except (AttributeError, OSError):
-                    pass
-                # Brief connect timeout so a wedged backend can't
-                # block this whole worker for the full TCP retry
-                # window (default 75s on Linux). After connect we
-                # restore blocking mode for the relay loop.
-                self.target.settimeout(SSH_CONNECT_TIMEOUT)
-                self.target.connect(address)
-                self.target.settimeout(None)
-                self.targetClosed = False
-                if cand_port != port:
-                    self.log += ' [fallback %s:%d]' % (cand_host, cand_port)
-                return
-            except (OSError, socket.timeout) as e:
-                last_err = e
-                try:
-                    self.target.close()
-                except Exception:
-                    pass
-                self.target = None
-        # All candidates failed — re-raise the last error so the
-        # outer handler can log and close the client.
-        raise last_err if last_err else OSError('no SSH backend reachable')
+        self.target = socket.socket(soc_family, soc_type, proto)
+        self.targetClosed = False
+        self.target.connect(address)
 
-    def method_CONNECT(self, path, reply=RESPONSE):
+    def method_CONNECT(self, path):
         self.method = 'CONNECT'
         self.log += ' - CONNECT ' + path
 
         self.connect_target(path)
-        # Send ONLY the HTTP reply here. The SSH banner comes from
-        # the backend through the doCONNECT relay loop. Bundling them
-        # in a single sendall() turned out to feed the injector's SSH
-        # stage stray bytes from the reply tail (the source of every
-        # earlier "Illegal packet size" value: 1213486160 = "HTTP",
-        # 1231976033 = "Ih=!", ...) — keeping the reply alone lets
-        # the Proxy stage's case-sensitive consume cleanly delimit
-        # where SSH actually starts.
-        try:
-            self.client.sendall(reply)
-        except OSError:
-            pass
+        self.client.sendall(RESPONSE)
+        self.client_buffer = b''
 
-        self.client_buffer = ''
         self.server.printLog(self.log)
         self.doCONNECT()
 
@@ -445,10 +313,10 @@ def parse_args(argv):
 
 
 def main(host=LISTENING_ADDR, port=LISTENING_PORT):
-    print("\033[0;34m" + "━" * 8 + " \033[1;32mPROXY WEBSOCKET\033[0;34m " + "━" * 8 + "\n")
+    print("\033[0;34m━" * 8, "\033[1;32m PROXY WEBSOCKET", "\033[0;34m━" * 8, "\n")
     print("\033[1;33mIP:\033[1;32m " + LISTENING_ADDR)
     print("\033[1;33mPORTA:\033[1;32m " + str(LISTENING_PORT) + "\n")
-    print("\033[0;34m" + "━" * 10 + " \033[1;32mVPSMANAGER\033[0;34m " + "━\033[1;37m" * 11 + "\n")
+    print("\033[0;34m━" * 10, "\033[1;32m VPSMANAGER", "\033[0;34m━\033[1;37m" * 11, "\n")
 
     server = Server(LISTENING_ADDR, LISTENING_PORT)
     server.start()
@@ -463,4 +331,5 @@ def main(host=LISTENING_ADDR, port=LISTENING_PORT):
 
 
 if __name__ == '__main__':
+    parse_args(sys.argv[1:])
     main()

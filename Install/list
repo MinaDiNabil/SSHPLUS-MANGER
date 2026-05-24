@@ -493,14 +493,14 @@ if [[ -f /etc/ssh/sshd_config ]]; then
 	# is the unauth concurrency cap (start:rate:full). 2000:30:5000 is
 	# the sweet spot: high enough that reconnect storms after a carrier
 	# blip don't get rejected by sshd, but not so high that a SYN/banner
-	# flood can pin ~250 MB of preauth state (each preauth fork is
-	# ~25 KB + an fd). The previous suggestion of 10000:30:50000
-	# effectively removed sshd's DoS protection; this value preserves
-	# it while still handling realistic burst arrivals.
-	# LoginGraceTime 30 caps how long an unauth connection can squat.
+	# flood can pin ~250 MB of preauth state.
+	# LoginGraceTime stays at the upstream default 120s — mobile
+	# injectors with custom payload + multi-stage SSH+TLS handshake
+	# can legitimately take 30-60s on a slow carrier, and the
+	# aggressive 30s cap was timing out real users mid-auth.
 	MaxStartups 2000:30:5000
 	MaxSessions 200
-	LoginGraceTime 30
+	LoginGraceTime 120
 	# END SSHPLUS-TUNING
 	SSH_EOF
 
@@ -1050,12 +1050,9 @@ else
 	# the previous wsproxy:700 intermediate-layer design. We now
 	# wire stunnel:443 directly to sshd:22 — matching the upstream
 	# SSHPLUS topology that's been field-proven against every common
-	# mobile injector for years. The wsproxy intermediate added a
-	# subtle relay path that broke "SSL TUNNEL + Payload" on some
-	# carrier networks; removing it restores the simpler upstream
-	# behaviour. Users who still want Payload via WS can install a
-	# separate WS proxy on a different port via the conexao menu
-	# (which uses wsproxy.py on the user-chosen port → backend SSH).
+	# mobile injector for years. Users who want Payload mode install
+	# a separate WS proxy via the conexao menu (wsproxy.py on a
+	# user-chosen port → backend SSH).
 	for _s in $(screen -ls 2>/dev/null | grep -E '\.sslmux(_[0-9]+)?$' | awk '{print $1}'); do
 		screen -S "$_s" -X quit 2>/dev/null
 	done
@@ -1063,84 +1060,84 @@ else
 	pkill -f 'wsproxy\.py 700 ' >/dev/null 2>&1
 	sed -i '/wsproxy\.py 700 /d' /etc/autostart 2>/dev/null
 
-	# Simple stunnel.conf — matches upstream SSHPLUS Install/stunnel
-	# topology (stunnel:443 → sshd:22) but keeps our high-concurrency
-	# tuning (TLS 1.2+ only, session cache, keep-alive sockets, debug
-	# off, long idle timeout). The systemd drop-in at
-	# /etc/systemd/system/stunnel4.service.d/99-highload.conf
-	# (LimitNOFILE=1048576 + Restart=always + OOMScoreAdjust=-900)
-	# is still applied below.
+	# Simple stunnel.conf matching upstream SSHPLUS Install/stunnel
+	# byte-for-byte. NO ciphersuite restrictions, NO TLS-version pin,
+	# NO socket option tuning at the config level — every one of those
+	# was a potential mismatch against the OpenSSL/stunnel version
+	# carrier networks negotiated with. Mobile injectors trained on
+	# the upstream config expect a permissive stunnel that just
+	# terminates TLS and forwards plaintext.
+	#
+	# (High-concurrency tuning is preserved via the systemd drop-in
+	# at /etc/systemd/system/stunnel4.service.d/99-highload.conf
+	# below — LimitNOFILE=1048576, Restart=always, OOMScoreAdjust=-900.
+	# That side of the tuning is independent of the wire format so it
+	# can't break TLS negotiation.)
 	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'
-; SSHPlus SSL TUNNEL — upstream-compatible topology (stunnel → sshd:22)
-; with high-concurrency tuning preserved.
-
-pid = /var/run/stunnel4/stunnel.pid
-output = /var/log/stunnel4/stunnel.log
-; debug = 0 disables per-connection logging (default debug = 4 writes
-; a few lines per TLS handshake, which on a 10K-handshake-per-second
-; box generates 100MB+ of stunnel.log per minute and stalls accept()
-; behind the disk write).
-debug = 0
-syslog = no
-
-cert = /etc/stunnel/stunnel.pem
+cert = /etc/stunnel/cert.pem
+key = /etc/stunnel/key.pem
 client = no
-
-socket = a:SO_REUSEADDR=1
-socket = a:SO_KEEPALIVE=1
-socket = a:TCP_KEEPIDLE=60
-socket = a:TCP_KEEPINTVL=15
-socket = a:TCP_KEEPCNT=4
-socket = l:TCP_NODELAY=1
-socket = l:SO_KEEPALIVE=1
-socket = r:TCP_NODELAY=1
-socket = r:SO_KEEPALIVE=1
-
-TIMEOUTbusy = 300
-TIMEOUTclose = 0
-TIMEOUTconnect = 30
-TIMEOUTidle = 86400
-
-; ----- High-concurrency tuning -----
-; sslVersionMin keeps us off SSLv3/TLSv1.0/1.1 which carriers MITM and
-; OpenSSL 3 disables by default anyway.
-sslVersionMin = TLSv1.2
-; Pin a fast, hardware-accelerated cipher list so each TLS handshake
-; finishes in ~1ms instead of falling back to slower legacy suites.
-ciphers = ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
-ciphersuites = TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
-options = NO_SSLv2
-options = NO_SSLv3
-options = NO_TLSv1
-options = NO_TLSv1.1
-; Session cache reduces the per-reconnect TLS cost from ~5ms to
-; ~0.5ms when the same client reconnects within the timeout window.
-sessionCacheSize = 100000
-sessionCacheTimeout = 3600
-
 [stunnel]
 connect = 127.0.0.1:22
 accept = 443
 STUNNEL_CONF
-	# Generate a fresh self-signed cert if the existing one is missing,
-	# expired, or doesn't have a private key in it (e.g. it's a leftover
-	# from a previous nginx/Let's Encrypt install). stunnel needs the
-	# concatenated cert + private key in the .pem file.
-	_regen_cert=0
-	if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
-		_regen_cert=1
-	elif ! grep -q "BEGIN .* PRIVATE KEY" /etc/stunnel/stunnel.pem 2>/dev/null; then
-		_regen_cert=1
-	elif ! openssl x509 -in /etc/stunnel/stunnel.pem -noout -checkend 0 >/dev/null 2>&1; then
-		_regen_cert=1
+
+	# Prefer the upstream-shipped Let's Encrypt cert from the repo's
+	# Install/cert + Install/key (the same files served by the
+	# original kiritosshxd/SSHPLUS install). Mobile injectors and
+	# carrier DPI systems have years of "this signature looks
+	# legitimate" history with the upstream cert; a freshly generated
+	# self-signed cert (CN=sshplus.local) gets blocked by some
+	# carriers' anti-VPN heuristics even though TLS validates fine.
+	#
+	# Cert resolution order:
+	#  1. Files already present on disk (admin-managed Let's Encrypt
+	#     etc.) — leave alone.
+	#  2. Bundled Install/cert + Install/key from the repo (preferred).
+	#  3. Fall back to generating a self-signed cert as a last resort.
+	_repo_cert=""; _repo_key=""
+	for _src_dir in "$HOME/SSHPLUS-main/Install" "$HOME/SSHPLUS-MANGER-main/Install" "/tmp/SSHPLUS-main/Install" "$(dirname "$0")/../Install" "/etc/SSHPlus" ; do
+		if [[ -s "$_src_dir/cert" && -s "$_src_dir/key" ]]; then
+			_repo_cert="$_src_dir/cert"; _repo_key="$_src_dir/key"; break
+		fi
+	done
+	# As a last resort, fetch from the published repo (this is the
+	# same URL the upstream Modulos/conexao SSL install uses, just
+	# pointed at our fork). Falls through to self-signed if offline.
+	if [[ -z "$_repo_cert" ]] && command -v wget >/dev/null 2>&1; then
+		if wget -q --tries=2 --timeout=15 \
+				https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/cert \
+				-O /tmp/sshplus-cert 2>/dev/null && \
+		   wget -q --tries=2 --timeout=15 \
+				https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/key \
+				-O /tmp/sshplus-key 2>/dev/null && \
+		   [[ -s /tmp/sshplus-cert && -s /tmp/sshplus-key ]]; then
+			_repo_cert=/tmp/sshplus-cert
+			_repo_key=/tmp/sshplus-key
+		fi
 	fi
-	if [[ $_regen_cert -eq 1 ]]; then
-		openssl genrsa -out /tmp/key.pem 2048 >/dev/null 2>&1
-		openssl req -new -x509 -key /tmp/key.pem -out /tmp/cert.pem -days 3650 -subj "/C=US/ST=NA/L=NA/O=SSHPlus/OU=SSHPlus/CN=sshplus.local" >/dev/null 2>&1
-		cat /tmp/cert.pem /tmp/key.pem >/etc/stunnel/stunnel.pem
-		chown stunnel4:stunnel4 /etc/stunnel/stunnel.pem 2>/dev/null
-		chmod 600 /etc/stunnel/stunnel.pem
-		rm -f /tmp/cert.pem /tmp/key.pem
+
+	if [[ -n "$_repo_cert" && -n "$_repo_key" ]]; then
+		install -m 644 "$_repo_cert" /etc/stunnel/cert.pem
+		install -m 600 "$_repo_key"  /etc/stunnel/key.pem
+		# Keep stunnel.pem (concatenated) for backwards compatibility
+		# with any drop-in config that still references it.
+		cat /etc/stunnel/cert.pem /etc/stunnel/key.pem >/etc/stunnel/stunnel.pem
+		chown stunnel4:stunnel4 /etc/stunnel/cert.pem /etc/stunnel/key.pem /etc/stunnel/stunnel.pem 2>/dev/null
+		chmod 644 /etc/stunnel/cert.pem
+		chmod 600 /etc/stunnel/key.pem /etc/stunnel/stunnel.pem
+		[[ -f /tmp/sshplus-cert ]] && rm -f /tmp/sshplus-cert /tmp/sshplus-key
+	elif [[ ! -s /etc/stunnel/cert.pem || ! -s /etc/stunnel/key.pem ]]; then
+		# Final fallback: generate self-signed. Only triggers when
+		# the repo cert isn't reachable AND no cert exists on disk.
+		openssl genrsa -out /etc/stunnel/key.pem 2048 >/dev/null 2>&1
+		openssl req -new -x509 -key /etc/stunnel/key.pem -out /etc/stunnel/cert.pem \
+			-days 3650 \
+			-subj "/C=US/ST=NA/L=NA/O=SSHPlus/OU=SSHPlus/CN=sshplus.local" >/dev/null 2>&1
+		cat /etc/stunnel/cert.pem /etc/stunnel/key.pem >/etc/stunnel/stunnel.pem
+		chown stunnel4:stunnel4 /etc/stunnel/cert.pem /etc/stunnel/key.pem /etc/stunnel/stunnel.pem 2>/dev/null
+		chmod 644 /etc/stunnel/cert.pem
+		chmod 600 /etc/stunnel/key.pem /etc/stunnel/stunnel.pem
 	fi
 	[[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
 
