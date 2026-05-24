@@ -21,9 +21,11 @@ except (IndexError, ValueError):
 PASS = ''
 BUFLEN = 8196 * 8
 TIMEOUT = 60
-MSG = 'ALERT'
+MSG = 'MinaProNet'
+COR = '<font color="green">'
+FTAG = '</font>'
 DEFAULT_HOST = '0.0.0.0:1194'
-RESPONSE = "HTTP/1.1 101 " + str(MSG) + "\r\n\r\n"
+RESPONSE = "HTTP/1.1 101 " + COR + MSG + FTAG + "\r\n\r\n"
 
 
 class Server(threading.Thread):
