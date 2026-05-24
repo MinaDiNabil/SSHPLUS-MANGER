@@ -877,21 +877,26 @@ LOOPBACK_EOF
 			[[ -n "$ssh_ports" ]] && echo -e "\033[1;33mACTIVE OpenSSH PORTS:\033[1;37m $ssh_ports"
 			[[ -n "$dropbear_main" ]] && echo -e "\033[1;33mACTIVE Dropbear PORT:\033[1;37m $dropbear_main"
 			echo ""
-			echo -e "\033[1;33m  Universal mode: handles Standard SSL, WS SSL+Payload,\033[0m"
-			echo -e "\033[1;33m  and WS SSL+Payload+Proxy on the same port via wsproxy mux.\033[0m"
-			echo ""
-			echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;37m• \033[1;33mINSTALL SSL TUNNEL (universal)\033[0m"
+			# Match upstream SSHPLUS topology: stunnel terminates TLS
+			# and forwards plaintext bytes directly to an SSH daemon
+			# on the chosen backend port. The "Payload" mode in mobile
+			# injectors is handled separately by installing a WS proxy
+			# on a different port via the WebSocket menu option —
+			# trying to overlay payload-handling on top of the SSL
+			# TUNNEL listener broke real-world connections through
+			# carrier NATs (Modulos/conexao history). Keeping the SSL
+			# TUNNEL strictly TLS→SSH preserves the field-proven path.
+			echo -e "\033[1;31m[\033[1;36m1\033[1;31m] \033[1;37m• \033[1;33mINSTALL SSL TUNNEL → OpenSSH:22\033[0m"
+			echo -e "\033[1;31m[\033[1;36m2\033[1;31m] \033[1;37m• \033[1;33mINSTALL SSL TUNNEL → Dropbear:${dropbear_main:-110}\033[0m"
 			echo -e "\033[1;31m[\033[1;36m0\033[1;31m] \033[1;37m• \033[1;33mBACK\033[0m"
 			echo ""
 			echo -ne "\033[1;32mWHAT DO YOU WANT TO DO \033[1;33m?\033[1;37m "
 			read resposta
 			echo ""
 			if [[ "$resposta" = '1' ]]; then
-				# stunnel hands plaintext to wsproxy on 127.0.0.1:700,
-				# which itself routes to sshd:22 — auto-detects raw SSH
-				# vs HTTP payload so a single 443 listener works for
-				# every mode the injector might send.
-				portssl='700'
+				portssl='22'
+			elif [[ "$resposta" = '2' ]]; then
+				portssl="${dropbear_main:-110}"
 			elif [[ "$resposta" = '0' ]]; then
 				echo -e "\033[1;31mReturning...\033[0m"
 				sleep 2
@@ -936,34 +941,19 @@ LOOPBACK_EOF
 				echo -e "\n\033[1;32mCONFIGURING SSL TUNNEL!\033[0m"
 				echo ""
 
-				# Start the wsproxy multiplexer if it isn't already on
-				# 127.0.0.1:700. Backend is OpenSSH:22 (matches upstream
-				# SSHPLUS), with automatic fallback to dropbear 110/143
-				# via wsproxy.py's SSH_FALLBACK_PORTS — see Install/list
-				# section [4/8] for full rationale on the backend choice.
-				start_sslmux() {
-					# Kill any wsproxy still bound to :700 with a stale
-					# backend port (an earlier revision routed through
-					# dropbear:110, which produced 60-second SSH connect
-					# timeouts on some configurations). Match ANY backend
-					# port — the new spawn below pins it to 22 cleanly.
+				# Sweep every legacy sslmux session and autostart entry
+				# from the prior wsproxy:700 intermediate-layer design.
+				# stunnel now talks directly to the SSH daemon — no
+				# Python relay in the SSL TUNNEL path.
+				cleanup_sslmux() {
 					for s in $(screen -ls 2>/dev/null | grep -E '\.sslmux(_[0-9]+)?$' | awk '{print $1}'); do
 						screen -S "$s" -X quit 2>/dev/null
 					done
 					screen -wipe >/dev/null 2>&1
 					pkill -f 'wsproxy\.py 700 ' >/dev/null 2>&1
-					sleep 1
-					# Strip every legacy autostart entry so only the
-					# OpenSSH:22 spawn remains.
 					sed -i '/wsproxy\.py 700 /d' /etc/autostart 2>/dev/null
-					if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-						screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'
-					fi
-					if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
-						echo "screen -ls 2>/dev/null | grep -qE '\.sslmux([[:space:]]|\$)' || screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'" >>/etc/autostart
-					fi
 				}
-				fun_bar 'start_sslmux'
+				fun_bar 'cleanup_sslmux'
 
 				ssl_conf() {
 					mkdir -p /etc/stunnel /var/run/stunnel4 /var/log/stunnel4
