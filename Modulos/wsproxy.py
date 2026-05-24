@@ -5,7 +5,12 @@ import threading
 import select
 import sys
 import time
+import os
 import getopt
+
+# Production toggle: set WSPROXY_DEBUG_LOG=1 in env to re-enable the
+# per-connection print() that used to deadlock under load.
+WSPROXY_DEBUG_LOG = os.environ.get('WSPROXY_DEBUG_LOG', '0') == '1'
 
 PASS = ''
 LISTENING_ADDR = '0.0.0.0'
@@ -118,9 +123,21 @@ class Server(threading.Thread):
             self.soc.close()
 
     def printLog(self, log):
-        self.logLock.acquire()
-        print(log)
-        self.logLock.release()
+        # No-op in production. At 5K+ connections/sec, holding a global
+        # lock and calling print() into a possibly-detached screen pty
+        # was the dominant GIL serialisation point in this process —
+        # and could deadlock every worker thread if the screen pty
+        # buffer filled up. The log content is debug-only and is not
+        # consumed by anything in the management toolkit. Toggle by
+        # setting environment variable WSPROXY_DEBUG_LOG=1 if needed.
+        if WSPROXY_DEBUG_LOG:
+            self.logLock.acquire()
+            try:
+                print(log, flush=True)
+            except (OSError, BlockingIOError):
+                pass
+            finally:
+                self.logLock.release()
 
     def addConn(self, conn):
         try:

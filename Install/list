@@ -92,6 +92,14 @@ for host in ${_host[@]}; do
 done
 [[ ! -e /etc/autostart ]] && {
 	echo '#!/bin/bash
+# flock guard: cron runs this script every minute. If a previous tick
+# is still respawning processes (e.g. during a reconnect storm), a
+# second concurrent run can spawn duplicate screen sessions for the
+# same port and the loser will silently EADDRINUSE. -n means
+# non-blocking — if the lock is held, exit immediately and try again
+# next minute.
+exec 9>/var/lock/sshplus-autostart.lock 2>/dev/null
+command -v flock >/dev/null 2>&1 && flock -n 9 || exit 0
 clear
 # Raise ulimits BEFORE spawning any screen sessions / daemons. Cron
 # (which runs this script every minute) inherits its own 1024-fd limit,
@@ -110,6 +118,14 @@ ulimit -l unlimited 2>/dev/null
 done
 	screen -wipe >/dev/null
 	echo '#!/bin/bash
+# flock guard: cron runs this script every minute. If a previous tick
+# is still respawning processes (e.g. during a reconnect storm), a
+# second concurrent run can spawn duplicate screen sessions for the
+# same port and the loser will silently EADDRINUSE. -n means
+# non-blocking — if the lock is held, exit immediately and try again
+# next minute.
+exec 9>/var/lock/sshplus-autostart.lock 2>/dev/null
+command -v flock >/dev/null 2>&1 && flock -n 9 || exit 0
 clear
 # Raise ulimits BEFORE spawning any screen sessions / daemons. Cron
 # (which runs this script every minute) inherits its own 1024-fd limit,
@@ -236,6 +252,43 @@ vm.dirty_ratio = 10
 vm.dirty_background_ratio = 5
 vm.overcommit_memory = 1
 
+# --- Process & thread ceilings for 1M+ users ---
+# Dropbear forks per connection; each fork uses 2-3 threads via
+# libpthread. 1M sessions ~= 3M threads. Default kernel.threads-max
+# scales with RAM and on a 4GB VPS is only ~32K — would silently
+# cap concurrency long before any other limit. pid_max defaults to
+# 4M already on modern kernels but pin it explicitly for older ones.
+kernel.threads-max = 4194304
+kernel.pid_max = 4194304
+
+# --- ARP / neighbor cache for 100K+ unique client IPs ---
+# Defaults (128/512/1024) overflow once the box sees more than
+# ~1K unique source IPs in the routing-decision window, producing
+# `neighbour: arp_cache: neighbor table overflow!` in dmesg and
+# random L2 connection drops for tunneled users.
+net.ipv4.neigh.default.gc_thresh1 = 4096
+net.ipv4.neigh.default.gc_thresh2 = 8192
+net.ipv4.neigh.default.gc_thresh3 = 16384
+net.ipv6.neigh.default.gc_thresh1 = 4096
+net.ipv6.neigh.default.gc_thresh2 = 8192
+net.ipv6.neigh.default.gc_thresh3 = 16384
+
+# --- inotify limits for sshmonitor / log watchers ---
+# Default max_user_watches=8192 is exhausted by file-activity-heavy
+# scripts at scale, silently dropping events. 524288 + 8192 instances
+# matches the Debian high-load tuning recommendation.
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 8192
+
+# --- Netfilter helper auto-loading: OFF ---
+# Defaults to ON, which lets the kernel guess that an inbound stream
+# is FTP/SIP/H.323/PPTP/IRC and load nf_conntrack_helper_* modules
+# automatically. At 1M sessions this is pure CPU waste (helper code
+# runs per-packet on candidate flows) AND a security risk
+# (heuristic-loaded helpers have historically allowed NAT pinhole
+# punching via crafted streams).
+net.netfilter.nf_conntrack_helper = 0
+
 # --- Auto-reboot on kernel panic to avoid stuck VPS ---
 kernel.panic = 10
 kernel.panic_on_oops = 1
@@ -320,6 +373,78 @@ systemctl daemon-reload >/dev/null 2>&1
 # Entropy daemon - shortens SSH/SSL key-exchange stalls on idle VPS
 command -v haveged >/dev/null 2>&1 || apt-get install haveged -y >/dev/null 2>&1
 systemctl enable --now haveged >/dev/null 2>&1 || true
+
+# --- CPU governor: performance ---
+# Default `powersave`/`ondemand` makes TLS handshakes ~2-3x slower
+# because the core stays at base clock during ramp-up. For a
+# tunneling server doing 10K+ handshakes/sec the difference is the
+# gap between needing 10 cores and 30 cores. We set the governor at
+# the file-system level (works without cpufrequtils) and persist
+# through cpufrequtils if available.
+for _cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+	[[ -w "$_cpu" ]] && echo performance > "$_cpu" 2>/dev/null
+done
+if apt-get install -y cpufrequtils >/dev/null 2>&1; then
+	echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
+	systemctl enable --now cpufrequtils >/dev/null 2>&1 || true
+fi
+
+# --- IRQ balancing across cores ---
+# Default cloud-image kernels park every NIC IRQ on CPU0, so a 10Gbit
+# NIC stops scaling past one core's softirq capacity (~1-2 Gbit on
+# commodity hardware). irqbalance redistributes IRQs across all cores.
+command -v irqbalance >/dev/null 2>&1 || apt-get install -y irqbalance >/dev/null 2>&1
+systemctl enable --now irqbalance >/dev/null 2>&1 || true
+
+# --- RPS (Receive Packet Steering) for single-queue NICs ---
+# Most cloud VPS get virtio-net with ONE rx queue, so even with
+# irqbalance every received packet is processed by the single softirq
+# CPU bound to that queue. RPS distributes the post-NAPI processing
+# across all cores. Mask = (1<<NCPU)-1 in hex, written into each
+# NIC queue's rps_cpus file. Idempotent and harmless on multi-queue
+# NICs (kernel ignores the value).
+_rps_cpus_mask=$(printf '%x' $(( (1 << $(nproc 2>/dev/null || echo 1)) - 1 )))
+_primary_nic=$(ip -o -4 route show default 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+if [[ -n "$_primary_nic" && -d "/sys/class/net/$_primary_nic/queues" ]]; then
+	for _q in /sys/class/net/$_primary_nic/queues/rx-*/rps_cpus; do
+		[[ -w "$_q" ]] && echo "$_rps_cpus_mask" > "$_q" 2>/dev/null
+	done
+	# Persist across reboots
+	cat > /etc/systemd/system/sshplus-rps.service <<-RPS_EOF
+	[Unit]
+	Description=SSHPlus: enable RPS on $_primary_nic for high-concurrency softirq processing
+	After=network-online.target
+	Wants=network-online.target
+
+	[Service]
+	Type=oneshot
+	ExecStart=/bin/sh -c 'for q in /sys/class/net/$_primary_nic/queues/rx-*/rps_cpus; do echo $_rps_cpus_mask > "\$q" 2>/dev/null || true; done'
+	RemainAfterExit=yes
+
+	[Install]
+	WantedBy=multi-user.target
+	RPS_EOF
+	systemctl enable sshplus-rps.service >/dev/null 2>&1 || true
+fi
+
+# --- Blacklist nf_conntrack helper modules ---
+# Pair with `net.netfilter.nf_conntrack_helper = 0` in sysctl: without
+# the blacklist the modules can still be loaded explicitly by other
+# packages (apparmor, fail2ban, distribution defaults). Stops every
+# tunneled-stream packet from being matched against FTP/SIP/IRC
+# signatures.
+cat > /etc/modprobe.d/sshplus-no-helpers.conf <<'BLACKLIST_EOF'
+# SSHPlus: disable nf_conntrack helpers we don't need (CPU + security)
+blacklist nf_conntrack_ftp
+blacklist nf_conntrack_sip
+blacklist nf_conntrack_h323
+blacklist nf_conntrack_pptp
+blacklist nf_conntrack_amanda
+blacklist nf_conntrack_irc
+blacklist nf_conntrack_snmp
+blacklist nf_conntrack_tftp
+blacklist nf_conntrack_sane
+BLACKLIST_EOF
 
 # Cap systemd journal so logs cannot fill the root partition
 mkdir -p /etc/systemd/journald.conf.d
@@ -620,6 +745,8 @@ else
 		# max_filedescriptors directive above actually takes effect.
 		# (squid.conf can request 1M fds but if the unit caps at 4096,
 		# squid silently clamps to 4096 and logs nothing.)
+		# Also add Restart=always so a Squid crash doesn't take down
+		# CONNECT proxy traffic until the next cron tick.
 		mkdir -p /etc/systemd/system/${squid_service}.service.d
 		cat > /etc/systemd/system/${squid_service}.service.d/99-highload.conf <<-SQUID_SVC_EOF
 		[Service]
@@ -627,6 +754,9 @@ else
 		LimitNPROC=infinity
 		LimitMEMLOCK=infinity
 		TasksMax=infinity
+		Restart=always
+		RestartSec=1s
+		OOMScoreAdjust=-800
 		SQUID_SVC_EOF
 
 		# Pre-create cache directories (even though caching is off,
@@ -702,6 +832,19 @@ apt-get update -y >/dev/null 2>&1
 apt-get install dropbear -y >/dev/null 2>&1
 sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear
 sed -i "s/DROPBEAR_PORT=22/DROPBEAR_PORT=110/g" /etc/default/dropbear
+# Debian's dropbear.service expands the receive window as
+# `-W "$DROPBEAR_RECEIVE_WINDOW" $DROPBEAR_EXTRA_ARGS`. Without
+# setting this explicitly, the env var stays at the Debian default
+# (65536), which means the kernel passes BOTH `-W 65536` (from the
+# service expansion) AND `-W 1048576` (from EXTRA_ARGS) on the
+# command line. Whether the 1MB value wins depends on the order of
+# getopt processing, which is undocumented. Setting the env var
+# directly makes the window unambiguous.
+if grep -qE '^[#[:space:]]*DROPBEAR_RECEIVE_WINDOW=' /etc/default/dropbear; then
+	sed -i 's|^[#[:space:]]*DROPBEAR_RECEIVE_WINDOW=.*|DROPBEAR_RECEIVE_WINDOW=1048576|' /etc/default/dropbear
+else
+	echo 'DROPBEAR_RECEIVE_WINDOW=1048576' >> /etc/default/dropbear
+fi
 # -p 143    : extra listener so the menu can offer two Dropbear ports
 # -K 30     : send a server-side keepalive every 30s (carrier NATs
 #             expire idle flows in 60-180s, killing VPN sessions)
@@ -723,6 +866,19 @@ TasksMax=infinity
 # Don't kill child sessions when the parent restarts — VPN users
 # stay connected across `service dropbear restart`.
 KillMode=process
+# Restart on any exit (clean, crash, signal). Debian's stock unit
+# only sets Restart=on-failure which doesn't cover clean exits or
+# SIGTERM-induced shutdowns — so a process-supervisor-driven restart
+# could leave the daemon dead and force VPN users to wait up to 60s
+# for cron's autostart watchdog to notice.
+Restart=always
+RestartSec=1s
+# OOMScoreAdjust at the systemd level applies to EVERY forked child
+# from birth. The previous approach (echo into /proc/PID/oom_score_adj
+# from cron) protected only the parent and any children alive when
+# the cron tick ran — brand-new sessions had the default score 0 and
+# were the first to be killed under memory pressure.
+OOMScoreAdjust=-900
 DROPBEAR_SVC_EOF
 systemctl daemon-reload >/dev/null 2>&1
 
@@ -893,21 +1049,44 @@ else
 
 	# Start the internal wsproxy multiplexer on 127.0.0.1:700 → dropbear:110.
 	# It auto-detects HTTP vs raw streams (see wsproxy.py HTTP_METHODS).
-	# Force-kill any old sslmux first so refreshed wsproxy.py takes
-	# effect — screen -dmS silently no-ops on duplicate session names,
-	# which is how stale code keeps serving after re-install.
+	#
+	# Spawn N = $(nproc) instances (capped at 8) rather than the
+	# legacy single instance. wsproxy.py is Python thread-per-
+	# connection — one process is GIL-bound around 5K-10K concurrent
+	# even on fast hardware. SO_REUSEPORT (set in wsproxy.py:84) lets
+	# the kernel load-balance accept() across every instance, so 8
+	# processes ≈ 8x concurrency ceiling for free. Each instance has
+	# its own GIL, so they actually run on different cores.
+	#
+	# Force-kill any old sslmux/sslmux_N first so refreshed wsproxy.py
+	# takes effect — screen -dmS silently no-ops on duplicate session
+	# names, which is how stale code keeps serving after re-install.
 	# Also strip stale autostart entries that point at the legacy
-	# wsproxy.py 700 22 backend so reboots pick up the new target.
-	for _s in $(screen -ls 2>/dev/null | grep '\.sslmux' | awk '{print $1}'); do
+	# single-instance or wsproxy.py 700 22 backend so reboots pick up
+	# the new multi-instance setup.
+	for _s in $(screen -ls 2>/dev/null | grep -E '\.sslmux(_[0-9]+)?$' | awk '{print $1}'); do
 		screen -S "$_s" -X quit 2>/dev/null
 	done
 	screen -wipe >/dev/null 2>&1
 	sed -i '/wsproxy\.py 700 22/d' /etc/autostart 2>/dev/null
+	sed -i '/wsproxy\.py 700 110/d' /etc/autostart 2>/dev/null
 	sleep 1
-	screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1
-	if ! grep -q 'wsproxy.py 700 110' /etc/autostart 2>/dev/null; then
-		echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110" >>/etc/autostart
-	fi
+
+	_nproc=$(nproc 2>/dev/null || echo 1)
+	[[ $_nproc -gt 8 ]] && _nproc=8
+	[[ $_nproc -lt 1 ]] && _nproc=1
+	for i in $(seq 1 $_nproc); do
+		# Redirect stdout/stderr to /dev/null — wsproxy.py's per-
+		# connection print() can deadlock when the screen pty buffer
+		# fills under load. Production has WSPROXY_DEBUG_LOG default
+		# to 0 so the calls no-op anyway, but redirecting belt-and-
+		# braces protects against a debug toggle leaking into prod.
+		screen -dmS sslmux_$i bash -c "exec python3 -u /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1"
+		# Per-minute autostart watchdog: respawn the i-th instance if
+		# its screen session disappeared. Each instance is identified
+		# by sslmux_$i so the watchdog never confuses them.
+		echo "screen -ls 2>/dev/null | grep -qE '\.sslmux_$i([[:space:]]|\$)' || screen -dmS sslmux_$i bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1'" >>/etc/autostart
+	done
 
 	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'
 ; SSHPlus SSL TUNNEL — stable configuration tuned for 1M+ user load.
@@ -992,6 +1171,13 @@ STUNNEL_CONF
 	# systemd drop-in: lift stunnel4's per-service file descriptor /
 	# task ceilings so it can hold open 100K+ concurrent TLS sessions
 	# without hitting the default 1024 fd cap.
+	#
+	# Debian's stock stunnel4.service has NO Restart= directive at all,
+	# meaning a crash (OOM, segfault on a malformed handshake, ENOMEM
+	# during a session-cache burst) leaves the daemon dead until the
+	# 60s cron watchdog. Adding Restart=always + RestartSec=1s drops
+	# the gap to sub-second. OOMScoreAdjust=-900 makes stunnel a last-
+	# resort OOM victim instead of a first-resort one.
 	mkdir -p /etc/systemd/system/stunnel4.service.d
 	cat > /etc/systemd/system/stunnel4.service.d/99-highload.conf <<'STUNNEL_SVC_EOF'
 [Service]
@@ -999,6 +1185,9 @@ LimitNOFILE=1048576
 LimitNPROC=infinity
 LimitMEMLOCK=infinity
 TasksMax=infinity
+Restart=always
+RestartSec=1s
+OOMScoreAdjust=-900
 STUNNEL_SVC_EOF
 
 	systemctl enable stunnel4 >/dev/null 2>&1
@@ -1260,8 +1449,16 @@ fi
 # sessions whose memory footprint creeps up over weeks. A 04:00 restart
 # is invisible to active sessions (SSH reconnects in <1s) and prevents
 # the slow leak from ever mattering.
+# Daily 04:00 refresh: quit every Python proxy screen so any wedged
+# connection handlers are reaped, THEN immediately run /etc/autostart
+# to bring them all back up. The previous version relied on the next
+# minute's autostart tick to respawn — meaning every day at 04:00,
+# SSL TUNNEL/SOCKS/WS were dead for up to 59 seconds, dropping every
+# in-flight session at the worst possible moment for an off-hours
+# maintenance window. The `&& /etc/autostart` chain closes the gap
+# to sub-second.
 if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
-	(crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
+	(crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\\.(ws[0-9]*|sslmux(_[0-9]+)?|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done; sleep 2; /etc/autostart >/dev/null 2>&1 # SSHPLUS_PROXY_RESTART') | crontab -
 fi
 
 # 12. Auto Execution — run the SSHPlus menu the moment the user logs in

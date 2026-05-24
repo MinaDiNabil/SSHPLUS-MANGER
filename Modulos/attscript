@@ -376,7 +376,11 @@ CONNTRACK_EOF
   # Register the daily proxy-restart cron entry that prevents long-term
   # memory creep in the Python proxies.
   if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
-    (crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
+    # Quit-and-respawn: chain `/etc/autostart` after the quit so the
+    # proxies come back within ~2 seconds instead of waiting up to
+    # 60s for the next per-minute autostart tick. Without this, every
+    # day at 04:00 SSL TUNNEL/SOCKS/WS users got dropped for a minute.
+    (crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\.(ws[0-9]*|sslmux(_[0-9]+)?|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done; sleep 2; /etc/autostart >/dev/null 2>&1 # SSHPLUS_PROXY_RESTART') | crontab -
   fi
 
   # Enable AUTO EXECUTION (menu;) on login if /etc/profile doesn't have it.
