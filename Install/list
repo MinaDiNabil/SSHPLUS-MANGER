@@ -1075,17 +1075,33 @@ else
 	_nproc=$(nproc 2>/dev/null || echo 1)
 	[[ $_nproc -gt 8 ]] && _nproc=8
 	[[ $_nproc -lt 1 ]] && _nproc=1
+	# Backend port for the SSL-TUNNEL multiplexer. Set to 22
+	# (OpenSSH) to match upstream SSHPLUS behaviour and to maximise
+	# compatibility with mobile injector apps that have working
+	# configs against the original setup. wsproxy.py also auto-
+	# falls back to 110/143 (dropbear) if OpenSSH stops responding,
+	# so dropbear-only installs still work — see SSH_FALLBACK_PORTS
+	# in Modulos/wsproxy.py.
+	#
+	# Why 22 not 110: an earlier revision routed SSL-TUNNEL through
+	# dropbear:110 on the theory that dropbear's smaller KEXINIT
+	# survived WebSocket frame-fragmentation better. In practice
+	# the mobile-injector "SSL TUNNEL + Payload" path is plain
+	# TLS-over-TCP with an HTTP bug-host prefix — no WebSocket
+	# framing — so OpenSSH's bigger KEXINIT is irrelevant and
+	# upstream's well-tested OpenSSH backend wins on stability.
+	SSLMUX_BACKEND_PORT=22
 	for i in $(seq 1 $_nproc); do
 		# Redirect stdout/stderr to /dev/null — wsproxy.py's per-
 		# connection print() can deadlock when the screen pty buffer
 		# fills under load. Production has WSPROXY_DEBUG_LOG default
 		# to 0 so the calls no-op anyway, but redirecting belt-and-
 		# braces protects against a debug toggle leaking into prod.
-		screen -dmS sslmux_$i bash -c "exec python3 -u /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1"
+		screen -dmS sslmux_$i bash -c "exec python3 -u /etc/SSHPlus/wsproxy.py 700 $SSLMUX_BACKEND_PORT >/dev/null 2>&1"
 		# Per-minute autostart watchdog: respawn the i-th instance if
 		# its screen session disappeared. Each instance is identified
 		# by sslmux_$i so the watchdog never confuses them.
-		echo "screen -ls 2>/dev/null | grep -qE '\.sslmux_$i([[:space:]]|\$)' || screen -dmS sslmux_$i bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1'" >>/etc/autostart
+		echo "screen -ls 2>/dev/null | grep -qE '\.sslmux_$i([[:space:]]|\$)' || screen -dmS sslmux_$i bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 $SSLMUX_BACKEND_PORT >/dev/null 2>&1'" >>/etc/autostart
 	done
 
 	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'

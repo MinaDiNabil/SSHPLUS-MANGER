@@ -238,20 +238,23 @@ fun_force_update () {
     if grep -qE '^[[:space:]]*connect[[:space:]]*=[[:space:]]*127\.0\.0\.1:(22|80)[[:space:]]*$' /etc/stunnel/stunnel.conf; then
       sed -i 's|^[[:space:]]*connect[[:space:]]*=.*|connect = 127.0.0.1:700|' /etc/stunnel/stunnel.conf
     fi
-    # Kill any sslmux still pointing at the legacy port-22 backend so the
-    # 700→110 target actually takes over on this attscript run.
-    if pgrep -af 'wsproxy\.py 700 22' >/dev/null 2>&1; then
-      for s in $(screen -ls 2>/dev/null | grep '\.sslmux' | awk '{print $1}'); do
-        screen -S "$s" -X quit 2>/dev/null
-      done
-      screen -wipe >/dev/null 2>&1
-    fi
-    sed -i '/wsproxy\.py 700 22/d' /etc/autostart 2>/dev/null
+    # Retire every legacy sslmux session — both `wsproxy.py 700 22`
+    # (pre-dropbear era) and `wsproxy.py 700 110` (dropbear era).
+    # The new spawn below pins the backend to OpenSSH:22 with
+    # automatic fallback to 110/143 inside wsproxy.py.
+    for s in $(screen -ls 2>/dev/null | grep -E '\.sslmux(_[0-9]+)?$' | awk '{print $1}'); do
+      screen -S "$s" -X quit 2>/dev/null
+    done
+    screen -wipe >/dev/null 2>&1
+    pkill -f 'wsproxy\.py 700 ' >/dev/null 2>&1
+    sleep 1
+    # Strip every legacy autostart entry so only the OpenSSH:22 spawn remains.
+    sed -i '/wsproxy\.py 700 /d' /etc/autostart 2>/dev/null
     if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-      screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1
+      screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'
     fi
-    if ! grep -q 'wsproxy.py 700 110' /etc/autostart 2>/dev/null; then
-      echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110" >>/etc/autostart
+    if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
+      echo "screen -ls 2>/dev/null | grep -qE '\.sslmux([[:space:]]|\$)' || screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'" >>/etc/autostart
     fi
 
     systemctl enable stunnel4 >/dev/null 2>&1
@@ -264,13 +267,13 @@ fun_force_update () {
   # prior quit silently skips when a session with the same name already
   # exists, which is exactly how an old wsproxy keeps serving stale
   # logic after a /bin/attscript upgrade.
-  for s in $(screen -ls 2>/dev/null | grep -E '\.(sslmux|ws[0-9]*|proxy|openpy)' | awk '{print $1}'); do
+  for s in $(screen -ls 2>/dev/null | grep -E '\.(sslmux(_[0-9]+)?|ws[0-9]*|proxy|openpy)' | awk '{print $1}'); do
     screen -S "$s" -X quit 2>/dev/null
   done
   screen -wipe >/dev/null 2>&1
   sleep 1
   if [[ -x /etc/SSHPlus/wsproxy.py ]] && ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-    screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1
+    screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'
   fi
 
   # Refresh /etc/autostart with the unified watchdog + stunnel watchdog
