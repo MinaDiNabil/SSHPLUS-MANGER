@@ -48,8 +48,8 @@ except (IndexError, ValueError):
 
 BUFLEN = 4096 * 4
 TIMEOUT = 60
-MSG = ''
-COR = '<font color="null">'
+MSG = 'MinaProNet'
+COR = '<font color="green">'
 FTAG = '</font>'
 DEFAULT_HOST = "127.0.0.1:" + str(SSH_PORT)
 

@@ -14,8 +14,8 @@ except (IndexError, ValueError):
 PASS = ''
 BUFLEN = 8196 * 8
 TIMEOUT = 60
-MSG = ''
-COR = '<font color="null">'
+MSG = 'MinaProNet'
+COR = '<font color="green">'
 FTAG = '</font>'
 DEFAULT_HOST = '0.0.0.0:22'
 RESPONSE = ("HTTP/1.1 200 " + str(COR) + str(MSG) + str(FTAG) + "\r\n\r\n").encode('utf-8')
