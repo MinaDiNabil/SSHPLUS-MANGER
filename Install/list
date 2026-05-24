@@ -1147,19 +1147,12 @@ else
 	# below — LimitNOFILE=1048576, Restart=always, OOMScoreAdjust=-900.
 	# That side of the tuning is independent of the wire format so it
 	# can't break TLS negotiation.)
-	#
-	# Backend: Dropbear:110 (not OpenSSH:22). Dropbear's smaller
-	# KEXINIT and lighter per-connection footprint make it the
-	# preferred SSH server behind a TLS tunnel — OpenSSH's bigger
-	# preauth state has been known to time out on slow carrier
-	# links with mobile injectors. Dropbear is installed by section
-	# [3/8] below and listens on 110 + 143.
 	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'
 cert = /etc/stunnel/cert.pem
 key = /etc/stunnel/key.pem
 client = no
 [stunnel]
-connect = 127.0.0.1:110
+connect = 127.0.0.1:22
 accept = 443
 STUNNEL_CONF
 

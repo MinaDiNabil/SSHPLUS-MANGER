@@ -228,16 +228,16 @@ fun_force_update () {
     fi
 
     # Migrate old installs whose stunnel.conf still points at the
-    # wsproxy multiplexer on 127.0.0.1:700, at the legacy sshd:22
-    # backend, or at port 80. Repoint at Dropbear:110, which is the
-    # current SSL TUNNEL backend of choice: Dropbear's smaller
-    # KEXINIT and lighter per-connection state survive slow-carrier
-    # mobile-injector handshakes better than OpenSSH:22.
+    # wsproxy multiplexer on 127.0.0.1:700 (an earlier revision used
+    # an intermediate Python relay between stunnel and sshd). The
+    # multiplexer broke "SSL TUNNEL + Payload" in real-world tests
+    # against carrier-NAT'd mobile injectors, so we revert to the
+    # upstream SSHPLUS topology: stunnel:443 → sshd:22 directly.
     # Users who want Payload mode install a WS proxy on a different
     # port via the conexao menu (handled by wsproxy.py on the user
     # port → backend SSH).
-    if grep -qE '^[[:space:]]*connect[[:space:]]*=[[:space:]]*127\.0\.0\.1:(700|80|22)[[:space:]]*$' /etc/stunnel/stunnel.conf 2>/dev/null; then
-      sed -i 's|^[[:space:]]*connect[[:space:]]*=.*|connect = 127.0.0.1:110|' /etc/stunnel/stunnel.conf
+    if grep -qE '^[[:space:]]*connect[[:space:]]*=[[:space:]]*127\.0\.0\.1:(700|80|110)[[:space:]]*$' /etc/stunnel/stunnel.conf 2>/dev/null; then
+      sed -i 's|^[[:space:]]*connect[[:space:]]*=.*|connect = 127.0.0.1:22|' /etc/stunnel/stunnel.conf
     fi
     # Retire every legacy sslmux session bound to :700 and its
     # autostart entries (regardless of which backend port the legacy
