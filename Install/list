@@ -1042,74 +1042,37 @@ if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
 	echo -e "\033[1;31m   ✗ Port 443 still in use${holder:+ by $holder}. Skipping SSL TUNNEL install.\033[0m"
 else
 	command -v openssl >/dev/null 2>&1 || apt-get install openssl -y >/dev/null 2>&1
-	command -v python3 >/dev/null 2>&1 || apt-get install python3 -y >/dev/null 2>&1
 	apt-get install -y stunnel4 >/dev/null 2>&1
 	mkdir -p /etc/stunnel /var/run/stunnel4 /var/log/stunnel4
 	chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
 
-	# Start the internal wsproxy multiplexer on 127.0.0.1:700 → dropbear:110.
-	# It auto-detects HTTP vs raw streams (see wsproxy.py HTTP_METHODS).
-	#
-	# Spawn N = $(nproc) instances (capped at 8) rather than the
-	# legacy single instance. wsproxy.py is Python thread-per-
-	# connection — one process is GIL-bound around 5K-10K concurrent
-	# even on fast hardware. SO_REUSEPORT (set in wsproxy.py:84) lets
-	# the kernel load-balance accept() across every instance, so 8
-	# processes ≈ 8x concurrency ceiling for free. Each instance has
-	# its own GIL, so they actually run on different cores.
-	#
-	# Force-kill any old sslmux/sslmux_N first so refreshed wsproxy.py
-	# takes effect — screen -dmS silently no-ops on duplicate session
-	# names, which is how stale code keeps serving after re-install.
-	# Also strip stale autostart entries that point at the legacy
-	# single-instance or wsproxy.py 700 22 backend so reboots pick up
-	# the new multi-instance setup.
+	# Retire EVERY leftover sslmux session and autostart entry from
+	# the previous wsproxy:700 intermediate-layer design. We now
+	# wire stunnel:443 directly to sshd:22 — matching the upstream
+	# SSHPLUS topology that's been field-proven against every common
+	# mobile injector for years. The wsproxy intermediate added a
+	# subtle relay path that broke "SSL TUNNEL + Payload" on some
+	# carrier networks; removing it restores the simpler upstream
+	# behaviour. Users who still want Payload via WS can install a
+	# separate WS proxy on a different port via the conexao menu
+	# (which uses wsproxy.py on the user-chosen port → backend SSH).
 	for _s in $(screen -ls 2>/dev/null | grep -E '\.sslmux(_[0-9]+)?$' | awk '{print $1}'); do
 		screen -S "$_s" -X quit 2>/dev/null
 	done
 	screen -wipe >/dev/null 2>&1
-	sed -i '/wsproxy\.py 700 22/d' /etc/autostart 2>/dev/null
-	sed -i '/wsproxy\.py 700 110/d' /etc/autostart 2>/dev/null
-	sleep 1
+	pkill -f 'wsproxy\.py 700 ' >/dev/null 2>&1
+	sed -i '/wsproxy\.py 700 /d' /etc/autostart 2>/dev/null
 
-	_nproc=$(nproc 2>/dev/null || echo 1)
-	[[ $_nproc -gt 8 ]] && _nproc=8
-	[[ $_nproc -lt 1 ]] && _nproc=1
-	# Backend port for the SSL-TUNNEL multiplexer. Set to 22
-	# (OpenSSH) to match upstream SSHPLUS behaviour and to maximise
-	# compatibility with mobile injector apps that have working
-	# configs against the original setup. wsproxy.py also auto-
-	# falls back to 110/143 (dropbear) if OpenSSH stops responding,
-	# so dropbear-only installs still work — see SSH_FALLBACK_PORTS
-	# in Modulos/wsproxy.py.
-	#
-	# Why 22 not 110: an earlier revision routed SSL-TUNNEL through
-	# dropbear:110 on the theory that dropbear's smaller KEXINIT
-	# survived WebSocket frame-fragmentation better. In practice
-	# the mobile-injector "SSL TUNNEL + Payload" path is plain
-	# TLS-over-TCP with an HTTP bug-host prefix — no WebSocket
-	# framing — so OpenSSH's bigger KEXINIT is irrelevant and
-	# upstream's well-tested OpenSSH backend wins on stability.
-	SSLMUX_BACKEND_PORT=22
-	for i in $(seq 1 $_nproc); do
-		# Redirect stdout/stderr to /dev/null — wsproxy.py's per-
-		# connection print() can deadlock when the screen pty buffer
-		# fills under load. Production has WSPROXY_DEBUG_LOG default
-		# to 0 so the calls no-op anyway, but redirecting belt-and-
-		# braces protects against a debug toggle leaking into prod.
-		screen -dmS sslmux_$i bash -c "exec python3 -u /etc/SSHPlus/wsproxy.py 700 $SSLMUX_BACKEND_PORT >/dev/null 2>&1"
-		# Per-minute autostart watchdog: respawn the i-th instance if
-		# its screen session disappeared. Each instance is identified
-		# by sslmux_$i so the watchdog never confuses them.
-		echo "screen -ls 2>/dev/null | grep -qE '\.sslmux_$i([[:space:]]|\$)' || screen -dmS sslmux_$i bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 $SSLMUX_BACKEND_PORT >/dev/null 2>&1'" >>/etc/autostart
-	done
-
+	# Simple stunnel.conf — matches upstream SSHPLUS Install/stunnel
+	# topology (stunnel:443 → sshd:22) but keeps our high-concurrency
+	# tuning (TLS 1.2+ only, session cache, keep-alive sockets, debug
+	# off, long idle timeout). The systemd drop-in at
+	# /etc/systemd/system/stunnel4.service.d/99-highload.conf
+	# (LimitNOFILE=1048576 + Restart=always + OOMScoreAdjust=-900)
+	# is still applied below.
 	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'
-; SSHPlus SSL TUNNEL — stable configuration tuned for 1M+ user load.
-; stunnel terminates TLS and hands the plaintext stream to the local
-; wsproxy multiplexer which transparently chooses raw-SSH vs HTTP
-; payload mode. Keep-alive sockets + long idle timeout prevent
-; carrier NATs and mobile firewalls from killing idle sessions.
+; SSHPlus SSL TUNNEL — upstream-compatible topology (stunnel → sshd:22)
+; with high-concurrency tuning preserved.
 
 pid = /var/run/stunnel4/stunnel.pid
 output = /var/log/stunnel4/stunnel.log
@@ -1139,9 +1102,6 @@ TIMEOUTconnect = 30
 TIMEOUTidle = 86400
 
 ; ----- High-concurrency tuning -----
-; fork-mode service handles each TLS connection in its own process so
-; one slow handshake can't block the listener. The compression knob
-; is left at the (faster) default.
 ; sslVersionMin keeps us off SSLv3/TLSv1.0/1.1 which carriers MITM and
 ; OpenSSL 3 disables by default anyway.
 sslVersionMin = TLSv1.2
@@ -1149,17 +1109,17 @@ sslVersionMin = TLSv1.2
 ; finishes in ~1ms instead of falling back to slower legacy suites.
 ciphers = ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
 ciphersuites = TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
-; Session cache reduces the per-reconnect TLS cost from ~5ms to
-; ~0.5ms when the same client reconnects within the timeout window.
 options = NO_SSLv2
 options = NO_SSLv3
 options = NO_TLSv1
 options = NO_TLSv1.1
+; Session cache reduces the per-reconnect TLS cost from ~5ms to
+; ~0.5ms when the same client reconnects within the timeout window.
 sessionCacheSize = 100000
 sessionCacheTimeout = 3600
 
 [stunnel]
-connect = 127.0.0.1:700
+connect = 127.0.0.1:22
 accept = 443
 STUNNEL_CONF
 	# Generate a fresh self-signed cert if the existing one is missing,

@@ -227,35 +227,27 @@ fun_force_update () {
       sleep 1
     fi
 
-    # Migrate old installs whose stunnel.conf still points straight at
-    # sshd:22 — that breaks WS SSL+Payload and WS SSL+Payload+Proxy.
-    # Repoint at the wsproxy multiplexer on 127.0.0.1:700 and bring
-    # the multiplexer up so a single 443 listener covers every mode.
-    # Backend is dropbear:110 (not sshd:22) — OpenSSH's 1000+ byte
-    # KEXINIT fragments badly through Cloudflare WebSocket, producing
-    # "Illegal packet size" on WS SSL+Payload modes. See Install/list
-    # section 4 for the full rationale.
-    if grep -qE '^[[:space:]]*connect[[:space:]]*=[[:space:]]*127\.0\.0\.1:(22|80)[[:space:]]*$' /etc/stunnel/stunnel.conf; then
-      sed -i 's|^[[:space:]]*connect[[:space:]]*=.*|connect = 127.0.0.1:700|' /etc/stunnel/stunnel.conf
+    # Migrate old installs whose stunnel.conf still points at the
+    # wsproxy multiplexer on 127.0.0.1:700 (an earlier revision used
+    # an intermediate Python relay between stunnel and sshd). The
+    # multiplexer broke "SSL TUNNEL + Payload" in real-world tests
+    # against carrier-NAT'd mobile injectors, so we revert to the
+    # upstream SSHPLUS topology: stunnel:443 → sshd:22 directly.
+    # Users who want Payload mode install a WS proxy on a different
+    # port via the conexao menu (handled by wsproxy.py on the user
+    # port → backend SSH).
+    if grep -qE '^[[:space:]]*connect[[:space:]]*=[[:space:]]*127\.0\.0\.1:(700|80|110)[[:space:]]*$' /etc/stunnel/stunnel.conf 2>/dev/null; then
+      sed -i 's|^[[:space:]]*connect[[:space:]]*=.*|connect = 127.0.0.1:22|' /etc/stunnel/stunnel.conf
     fi
-    # Retire every legacy sslmux session — both `wsproxy.py 700 22`
-    # (pre-dropbear era) and `wsproxy.py 700 110` (dropbear era).
-    # The new spawn below pins the backend to OpenSSH:22 with
-    # automatic fallback to 110/143 inside wsproxy.py.
+    # Retire every legacy sslmux session bound to :700 and its
+    # autostart entries (regardless of which backend port the legacy
+    # spawn was using — 22, 80, 110, ...).
     for s in $(screen -ls 2>/dev/null | grep -E '\.sslmux(_[0-9]+)?$' | awk '{print $1}'); do
       screen -S "$s" -X quit 2>/dev/null
     done
     screen -wipe >/dev/null 2>&1
     pkill -f 'wsproxy\.py 700 ' >/dev/null 2>&1
-    sleep 1
-    # Strip every legacy autostart entry so only the OpenSSH:22 spawn remains.
     sed -i '/wsproxy\.py 700 /d' /etc/autostart 2>/dev/null
-    if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-      screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'
-    fi
-    if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
-      echo "screen -ls 2>/dev/null | grep -qE '\.sslmux([[:space:]]|\$)' || screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'" >>/etc/autostart
-    fi
 
     systemctl enable stunnel4 >/dev/null 2>&1
     systemctl daemon-reload >/dev/null 2>&1
@@ -266,15 +258,13 @@ fun_force_update () {
   # proxy.py / open.py code is actually running. screen -dmS without a
   # prior quit silently skips when a session with the same name already
   # exists, which is exactly how an old wsproxy keeps serving stale
-  # logic after a /bin/attscript upgrade.
+  # logic after a /bin/attscript upgrade. Note: sslmux (port 700) is
+  # NOT respawned — the SSL TUNNEL no longer routes through it.
   for s in $(screen -ls 2>/dev/null | grep -E '\.(sslmux(_[0-9]+)?|ws[0-9]*|proxy|openpy)' | awk '{print $1}'); do
     screen -S "$s" -X quit 2>/dev/null
   done
   screen -wipe >/dev/null 2>&1
   sleep 1
-  if [[ -x /etc/SSHPlus/wsproxy.py ]] && ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-    screen -dmS sslmux bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1'
-  fi
 
   # Refresh /etc/autostart with the unified watchdog + stunnel watchdog
   # blocks. Older installs that pre-date these blocks pick them up here.
