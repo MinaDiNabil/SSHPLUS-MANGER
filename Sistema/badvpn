@@ -52,11 +52,48 @@ tput cnorm
 
 [[ $(awk -F" " '{print $2}' /usr/lib/licence) != "@KIRITO_SSH" ]] && exit 0
 
-# Verify a binary at $1 is an actual ELF executable (not an HTML
-# error page from a dead mirror). Returns 0 if valid, 1 otherwise.
+# Verify a binary at $1 is an actual ELF executable of the CURRENT
+# host's architecture — not just any ELF (the e_machine field tells
+# us whether the binary will actually exec on this CPU). Returns 0
+# if valid for this host, 1 otherwise.
 fun_is_elf () {
     [[ -s "$1" ]] || return 1
-    head -c 4 "$1" 2>/dev/null | grep -q $'\x7fELF'
+    # First 4 bytes must be the ELF magic (\x7fELF).
+    head -c 4 "$1" 2>/dev/null | grep -q $'\x7fELF' || return 1
+    # Byte 5 (EI_CLASS) and bytes 19-20 (e_machine, little-endian)
+    # together identify the architecture. We accept the binary only
+    # when both match the running kernel; otherwise install -m would
+    # happily put an x86_64 ELF on an aarch64 host and BadVPN would
+    # exit with ENOEXEC at every screen respawn.
+    local _ei_class _emachine_b18 _emachine_b19 _arch
+    _ei_class=$(od -An -tx1 -N1 -j4 "$1" 2>/dev/null | tr -d ' ')
+    _emachine_b18=$(od -An -tx1 -N1 -j18 "$1" 2>/dev/null | tr -d ' ')
+    _emachine_b19=$(od -An -tx1 -N1 -j19 "$1" 2>/dev/null | tr -d ' ')
+    _arch=$(uname -m 2>/dev/null)
+    case "$_arch" in
+        x86_64|amd64)
+            # ELFCLASS64 + EM_X86_64 (0x3e 0x00 LE)
+            [[ "$_ei_class" = "02" && "$_emachine_b18" = "3e" && "$_emachine_b19" = "00" ]]
+            ;;
+        aarch64|arm64|armv8*)
+            # ELFCLASS64 + EM_AARCH64 (0xb7 0x00 LE)
+            [[ "$_ei_class" = "02" && "$_emachine_b18" = "b7" && "$_emachine_b19" = "00" ]]
+            ;;
+        armv7*|armv6*|armhf|arm)
+            # ELFCLASS32 + EM_ARM (0x28 0x00 LE)
+            [[ "$_ei_class" = "01" && "$_emachine_b18" = "28" && "$_emachine_b19" = "00" ]]
+            ;;
+        i386|i486|i586|i686)
+            # ELFCLASS32 + EM_386 (0x03 0x00 LE)
+            [[ "$_ei_class" = "01" && "$_emachine_b18" = "03" && "$_emachine_b19" = "00" ]]
+            ;;
+        *)
+            # Unknown host arch — fall back to magic-only check rather
+            # than refusing every install. Better to attempt and let
+            # the user see the ENOEXEC than to silently refuse.
+            return 0
+            ;;
+    esac
 }
 
 # Download the BadVPN binary, validate it, install to /bin. Returns 0
@@ -83,8 +120,10 @@ fun_install_badvpn () {
 # line so reboot respawns don't drift back to the legacy low-cap args.
 fun_start_badvpn () {
     # Kill any stale udpvpn screen so the new high-cap one wins on the
-    # 127.0.0.1:7300 bind.
-    screen -ls 2>/dev/null | grep -qE '\.udpvpn\b' && screen -S udpvpn -X quit 2>/dev/null
+    # 127.0.0.1:7300 bind. Use a strict regex anchored on whitespace or
+    # end-of-line — \b (word boundary) matches '-' (non-word char), so
+    # `\.udpvpn\b` would falsely match a session named '.udpvpn-old'.
+    screen -ls 2>/dev/null | grep -qE '\.udpvpn([[:space:]]|$)' && screen -S udpvpn -X quit 2>/dev/null
     screen -wipe >/dev/null 2>&1
     screen -dmS udpvpn $BADVPN_CMD
     # Refresh autostart: drop every previous udpvpn line then re-add
@@ -118,7 +157,11 @@ fun_udp1 () {
     # Confirm the daemon is actually bound to 7300/udp before claiming
     # success — past versions reported "ATIVO!" even when the screen
     # session died one second after spawn.
-    if ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
+    # `ss -lnuH` prints "UNCONN 0 0 127.0.0.1:7300 0.0.0.0:*" — the
+    # local address is $4, not $5 ($5 is the peer wildcard which never
+    # matches our port). Using the wrong field made every successful
+    # install report "NÃO ESTÁ ESCUTANDO" in red.
+    if ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
         echo -e "\n  \033[1;32mBADVPN ATIVO !\033[0m"
         echo -e "\033[1;36m    Limite: 1.000.000 clientes / 100 conexões por cliente\033[0m"
     else

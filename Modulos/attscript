@@ -125,8 +125,35 @@ fun_force_update () {
   # BadVPN binary from Modulos/. The udpgw daemon itself lives at
   # /bin/badvpn-udpgw; refresh it whenever the upstream binary changes
   # so a fresh attscript run also picks up any binary update.
+  #
+  # CRITICAL: Modulos/badvpn in the repo is an x86_64 ELF. The
+  # previous version of this check only validated the leading 4 bytes
+  # (ELF magic) which match ANY architecture — running attscript on
+  # an aarch64 host would silently overwrite the working ARM binary
+  # with a useless x86_64 one, and the next BadVPN respawn would die
+  # with ENOEXEC. Verify the EM_X86_64 e_machine field (byte 18 =
+  # 0x3e, byte 19 = 0x00) before installing, and only proceed if the
+  # current host is actually x86_64.
   if [[ -f "$src/Modulos/badvpn" ]] && head -c 4 "$src/Modulos/badvpn" 2>/dev/null | grep -q $'\x7fELF'; then
-    install -m 755 "$src/Modulos/badvpn" /bin/badvpn-udpgw
+    local _host_arch _bv_b18 _bv_b19
+    _host_arch=$(uname -m 2>/dev/null)
+    _bv_b18=$(od -An -tx1 -N1 -j18 "$src/Modulos/badvpn" 2>/dev/null | tr -d ' ')
+    _bv_b19=$(od -An -tx1 -N1 -j19 "$src/Modulos/badvpn" 2>/dev/null | tr -d ' ')
+    case "$_host_arch" in
+      x86_64|amd64)
+        # EM_X86_64 = 0x3e 0x00 little-endian
+        if [[ "$_bv_b18" = "3e" && "$_bv_b19" = "00" ]]; then
+          install -m 755 "$src/Modulos/badvpn" /bin/badvpn-udpgw
+        fi
+        ;;
+      *)
+        # Wrong-arch binary in repo for this host — leave existing
+        # /bin/badvpn-udpgw alone. The user installed it via a
+        # platform-specific path (listARM, native build, etc.) and we
+        # must not clobber it with the x86_64 blob.
+        :
+        ;;
+    esac
   fi
 
   # Helper files that live in /etc/SSHPlus/ (not run from /bin/).
@@ -314,22 +341,35 @@ LOGROTATE_EOF
     mkdir -p /var/log/sshplus
   fi
 
-  # Add conntrack + overcommit_memory to sysctl drop-in if missing.
-  if [[ -f /etc/sysctl.d/99-sshplus.conf ]] && ! grep -q 'nf_conntrack_max' /etc/sysctl.d/99-sshplus.conf; then
-    cat >>/etc/sysctl.d/99-sshplus.conf <<'CONNTRACK_EOF'
+  # Add or refresh conntrack + overcommit_memory to sysctl drop-in.
+  # Two phases:
+  #   1. Append the block if it's entirely missing (fresh install
+  #      that pre-dates the conntrack section).
+  #   2. Bump in-place when an older attscript wrote the old 1M/256K
+  #      ceilings — the install/list values are now 4M/1M to match
+  #      1M+ user installations, and the prior `grep -q` guard meant
+  #      legacy installs were frozen at the old caps forever.
+  if [[ -f /etc/sysctl.d/99-sshplus.conf ]]; then
+    if ! grep -q 'nf_conntrack_max' /etc/sysctl.d/99-sshplus.conf; then
+      cat >>/etc/sysctl.d/99-sshplus.conf <<'CONNTRACK_EOF'
 
-# --- Connection tracking (added by attscript upgrade) ---
-net.netfilter.nf_conntrack_max = 1048576
-net.nf_conntrack_max = 1048576
+# --- Connection tracking (added by attscript upgrade, sized for 1M+ users) ---
+net.netfilter.nf_conntrack_max = 4194304
+net.nf_conntrack_max = 4194304
 net.netfilter.nf_conntrack_tcp_timeout_established = 86400
 net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
-net.netfilter.nf_conntrack_buckets = 262144
+net.netfilter.nf_conntrack_buckets = 1048576
 vm.overcommit_memory = 1
 CONNTRACK_EOF
+    else
+      # Bump legacy 1M ceiling to 4M in-place
+      sed -i -E 's|^(net\.(netfilter\.)?nf_conntrack_max)[[:space:]]*=[[:space:]]*1048576[[:space:]]*$|\1 = 4194304|' /etc/sysctl.d/99-sshplus.conf
+      sed -i -E 's|^(net\.netfilter\.nf_conntrack_buckets)[[:space:]]*=[[:space:]]*262144[[:space:]]*$|\1 = 1048576|' /etc/sysctl.d/99-sshplus.conf
+    fi
     modprobe nf_conntrack 2>/dev/null
-    echo 262144 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+    echo 1048576 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
     sysctl --system >/dev/null 2>&1 || true
   fi
 
@@ -346,8 +386,13 @@ CONNTRACK_EOF
   fi
 
   # Make sure BadVPN's screen session is alive on the next /etc/autostart tick.
-  if [[ -x /bin/badvpn-udpgw ]] && ! ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
-    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000 2>/dev/null
+  # Uses awk '{print $4}' — ss -lnuH prints the local address in $4, not $5
+  # ($5 is the peer wildcard 0.0.0.0:* which never matches). And the spawn
+  # uses the 1M-client baseline that matches Install/list section [1/8]
+  # and Sistema/badvpn — keeping the watchdog at the old 10K cap would
+  # silently downgrade BadVPN every time attscript re-ran.
+  if [[ -x /bin/badvpn-udpgw ]] && ! ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
+    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576 2>/dev/null
   fi
 
   [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1

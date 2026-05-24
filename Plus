@@ -148,12 +148,28 @@ if [[ "$SSHPLUS_AUTO" = "1" ]]; then
         echo -e "\033[1;36mOption: \033[1;37m${AUTO_ARCH} \033[1;32m(auto-detected: ${AUTO_ARCH_NAME})\033[0m"
         resposta="$AUTO_ARCH"
     else
-        echo -e "\033[1;33m  ⚠ Unknown CPU architecture '${AUTO_ARCH_NAME}' — falling back to manual selection.\033[0m"
-        echo -e "\033[1;36mSelect your VPS Architecture: \033[1;37m"
-        echo -e "[1] - x86_64"
-        echo -e "[2] - aarch64(ARM)"
-        echo -ne "\033[1;36mOption: \033[1;37m"
-        read resposta
+        # Unrecognised CPU architecture in unattended mode. Reading
+        # from a closed stdin (curl | bash) returns empty immediately
+        # and the script would silently exit with "Invalid option!"
+        # — leaving the operator with no clue why the install didn't
+        # happen. Surface a loud error and a recovery hint instead.
+        echo ""
+        echo -e "\033[1;31m  ✗ ERROR: unsupported CPU architecture '${AUTO_ARCH_NAME}'\033[0m"
+        echo -e "\033[1;33m    This installer ships pre-built binaries for x86_64 and aarch64 only.\033[0m"
+        echo -e "\033[1;33m    Re-run interactively (without piping) to override, or use one of:\033[0m"
+        echo -e "\033[1;33m      curl ... | bash -s -- --arch=1   # force x86_64\033[0m"
+        echo -e "\033[1;33m      curl ... | bash -s -- --arch=2   # force aarch64\033[0m"
+        # Honour the --arch=N override if it was supplied
+        for _arg in "$@"; do
+            case "$_arg" in
+                --arch=1) resposta=1 ;;
+                --arch=2) resposta=2 ;;
+            esac
+        done
+        if [[ -z "$resposta" ]]; then
+            exit 1
+        fi
+        echo -e "\033[1;32m    Forced architecture: ${resposta}\033[0m"
     fi
 else
     echo -ne "\033[1;36mGENERATE FREE KEY [Y/N]: \033[1;37m"

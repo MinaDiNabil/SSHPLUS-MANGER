@@ -941,6 +941,22 @@ LOOPBACK_EOF
 				# large for Cloudflare WebSocket fragmentation — see the
 				# topology block in Install/list section 4.
 				start_sslmux() {
+					# Kill any sslmux still pointing at the legacy port-22
+					# backend BEFORE the listener check. Without this, the
+					# previous version would strip the autostart entry but
+					# leave the in-memory daemon running on :700 with the
+					# wrong backend, then the ss check would see :700 was
+					# already bound and silently skip spawning the new
+					# :700→:110 instance — defeating the whole migration.
+					if pgrep -af 'wsproxy\.py 700 22' >/dev/null 2>&1; then
+						for s in $(screen -ls 2>/dev/null | grep '\.sslmux' | awk '{print $1}'); do
+							screen -S "$s" -X quit 2>/dev/null
+						done
+						screen -wipe >/dev/null 2>&1
+						# Also kill any bare python process matching the legacy backend
+						pkill -f 'wsproxy\.py 700 22' >/dev/null 2>&1
+						sleep 1
+					fi
 					sed -i '/wsproxy\.py 700 22/d' /etc/autostart 2>/dev/null
 					if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
 						screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1

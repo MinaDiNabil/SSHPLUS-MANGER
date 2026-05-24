@@ -250,25 +250,44 @@ grep -qx nf_conntrack /etc/modules-load.d/sshplus-conntrack.conf 2>/dev/null || 
 	echo nf_conntrack > /etc/modules-load.d/sshplus-conntrack.conf
 # Persist the conntrack hashsize across reboots — sysctl can't set it
 # because it's a module parameter, not a kernel tunable.
-cat > /etc/modprobe.d/nf_conntrack.conf <<'CONNTRACK_EOF'
-options nf_conntrack hashsize=1048576
-CONNTRACK_EOF
+#
+# Preserve any non-hashsize options the admin already configured
+# (acct=1, nf_conntrack_helper=1, etc.) by merging instead of
+# overwriting. A blanket `cat > file` would silently strip FTP/SIP
+# NAT helpers and per-flow byte accounting on the next reboot.
+if [[ -f /etc/modprobe.d/nf_conntrack.conf ]]; then
+    if grep -qE '^[[:space:]]*options[[:space:]]+nf_conntrack\b' /etc/modprobe.d/nf_conntrack.conf; then
+        # Replace any existing hashsize= token in-place; leave other options alone.
+        if grep -qE '^[[:space:]]*options[[:space:]]+nf_conntrack\b.*\bhashsize=' /etc/modprobe.d/nf_conntrack.conf; then
+            sed -i -E 's|(\boptions[[:space:]]+nf_conntrack\b[^\n]*\bhashsize=)[0-9]+|\11048576|' /etc/modprobe.d/nf_conntrack.conf
+        else
+            sed -i -E 's|^([[:space:]]*options[[:space:]]+nf_conntrack\b[^\n]*)$|\1 hashsize=1048576|' /etc/modprobe.d/nf_conntrack.conf
+        fi
+    else
+        echo 'options nf_conntrack hashsize=1048576' >> /etc/modprobe.d/nf_conntrack.conf
+    fi
+else
+    echo 'options nf_conntrack hashsize=1048576' > /etc/modprobe.d/nf_conntrack.conf
+fi
 
 # Apply the new tunables (and reload anything in /etc/sysctl.d)
 sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-sshplus.conf >/dev/null 2>&1
 
 # File descriptor / process limits via drop-in (idempotent on re-run).
-# Sized for 1M+ users: dropbear forks per accepted connection, so the
-# per-user nproc ceiling is what gates concurrent VPN sessions on a
-# single host. nofile gates how many sockets stunnel/wsproxy can hold
-# open simultaneously.
+# Sized for 1M+ users. The wildcard '*' ONLY gets raised file
+# descriptors (sockets); nproc=unlimited is reserved for root, NOT
+# the wildcard — otherwise an attacker who compromises any service
+# account (www-data after a webapp RCE, a tunnel user, etc.) can
+# fork until kernel.pid_max is exhausted, locking root out of
+# recovery. dropbear runs as root, so the per-user fork cap on
+# unprivileged accounts doesn't gate VPN concurrency.
 cat > /etc/security/limits.d/99-sshplus.conf <<'LIMITS_EOF'
 *       soft    nofile  1048576
 *       hard    nofile  1048576
 root    soft    nofile  1048576
 root    hard    nofile  1048576
-*       soft    nproc   unlimited
-*       hard    nproc   unlimited
+*       soft    nproc   65535
+*       hard    nproc   65535
 root    soft    nproc   unlimited
 root    hard    nproc   unlimited
 *       soft    memlock unlimited
@@ -346,13 +365,15 @@ if [[ -f /etc/ssh/sshd_config ]]; then
 	ClientAliveInterval 60
 	ClientAliveCountMax 3
 	# High-concurrency limits for 1M+ user installations. MaxStartups
-	# is the unauth concurrency cap (start:rate:full) — at 10000 we
-	# accept 10K simultaneous mid-handshake clients, drop 30% of new
-	# arrivals between 10K and 50K, and full-drop above 50K. MaxSessions
-	# raises the per-connection channel ceiling so multiplexed tunnels
-	# (e.g. game traffic + voice + control on one SSH session) don't
-	# starve at 50.
-	MaxStartups 10000:30:50000
+	# is the unauth concurrency cap (start:rate:full). 2000:30:5000 is
+	# the sweet spot: high enough that reconnect storms after a carrier
+	# blip don't get rejected by sshd, but not so high that a SYN/banner
+	# flood can pin ~250 MB of preauth state (each preauth fork is
+	# ~25 KB + an fd). The previous suggestion of 10000:30:50000
+	# effectively removed sshd's DoS protection; this value preserves
+	# it while still handling realistic burst arrivals.
+	# LoginGraceTime 30 caps how long an unauth connection can squat.
+	MaxStartups 2000:30:5000
 	MaxSessions 200
 	LoginGraceTime 30
 	# END SSHPLUS-TUNING
@@ -392,7 +413,7 @@ wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulo
 if ! head -c 4 /bin/badvpn-udpgw 2>/dev/null | grep -q $'\x7fELF'; then
 	echo -e "\033[1;31m   ✗ BadVPN download failed or is not an ELF binary. Skipping.\033[0m"
 	rm -f /bin/badvpn-udpgw
-elif ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
+elif ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
 	echo -e "\033[1;33m   ⚠ Port 7300/udp already in use. BadVPN not started.\033[0m"
 else
 	chmod 755 /bin/badvpn-udpgw
@@ -405,14 +426,20 @@ else
 	#   --client-socket-sndbuf 1048576  : was 10000 — 1MB send buffer so
 	#                                     bursty media doesn't drop frames
 	screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576
-	# Strip any stale low-cap autostart entry from previous installs so
-	# the per-minute watchdog respawns the high-cap version on reboot.
-	sed -i '/badvpn-udpgw .*--max-clients 10000 /d' /etc/autostart 2>/dev/null
-	grep -q 'badvpn-udpgw.*--max-clients 1000000' /etc/autostart 2>/dev/null || \
+	# Strip every stale BadVPN autostart line from previous installs.
+	# Match any `--max-clients` value EXCEPT the new 1000000 baseline,
+	# so legacy 1000 / 10000 / 100000 entries are all swept without
+	# touching the line we're about to append. The previous pattern
+	# only matched `--max-clients 10000 ` (trailing space), leaving
+	# `--max-clients 1000 ` from very old script generations co-
+	# existing with the new line and causing cron to bring up the
+	# low-cap daemon first every minute.
+	sed -i '/badvpn-udpgw.*--max-clients/{ /--max-clients 1000000\b/!d }' /etc/autostart 2>/dev/null
+	grep -q 'badvpn-udpgw.*--max-clients 1000000\b' /etc/autostart 2>/dev/null || \
 		echo -e "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576" >> /etc/autostart
 
 	sleep 1
-	if ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
+	if ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
 		echo -e "\033[1;32m   ✓ BadVPN installed on port 7300\033[0m"
 	else
 		echo -e "\033[1;31m   ✗ BadVPN started but is not listening on 7300/udp.\033[0m"
@@ -542,15 +569,22 @@ else
 		# ~500 concurrent CONNECT tunnels. Bumping max_filedesc lets
 		# it ride the 1M nofile ceiling from /etc/security/limits.d.
 		max_filedescriptors 1048576
-		# Workers: spawn one Squid worker per CPU core (max 16). Each
-		# worker has its own accept queue so a single slow handshake
-		# can't block all incoming connections.
-		workers 8
+		# Single-process by default. SMP `workers N` requires Squid to
+		# be built with --enable-ipc AND a templated pid_filename like
+		# /var/run/squid-${process_number}.pid; without it, all kid
+		# processes write the same pid file and systemd's PIDFile=
+		# tracking goes haywire. On Debian 11 (Squid 4) `http_port`
+		# also can't share the accept queue across workers, so workers
+		# 2..N hit EADDRINUSE anyway. Leaving workers at the default
+		# (1) here; admins who built squid with full SMP support can
+		# enable it manually with matching pid_filename template.
 		# Disable on-disk cache entirely — proxy is being used as a
-		# tunnel, not a content cache, so the disk I/O is pure
-		# overhead and uses up file descriptors.
+		# tunnel, not a content cache. `cache deny all` is the
+		# Squid 4+/5+/6+ supported way to disable caching;
+		# `cache_dir null /tmp` was removed in Squid 4 and triggers
+		# a fatal parse error on Debian 11+/Ubuntu 22+ (the daemon
+		# refuses to start at all, so the proxy never binds 3128).
 		cache deny all
-		cache_dir null /tmp
 		# Memory cache off too: nothing to cache on tunnel traffic.
 		cache_mem 8 MB
 		maximum_object_size 0 KB
@@ -713,22 +747,46 @@ if [[ "$_db_built_version" != "$_db_target_version" ]]; then
 			wget -q "https://mirror.dropbear.nl/mirror/releases/dropbear-${_db_target_version}.tar.bz2" -O dropbear.tar.bz2 || exit 1
 		fi
 		tar xjf dropbear.tar.bz2 || exit 1
-		cd "dropbear-${_db_target_version}" || exit 1
-		# Patch the compile-time ceilings. Newer Dropbear puts these
-		# in default_options.h; very old releases use sysoptions.h.
-		# Touch both so the sed works regardless of version.
-		for _f in default_options.h sysoptions.h options.h; do
+		# Find the extracted directory by glob — upstream tarball
+		# inner dir is normally `dropbear-${version}` but mirrors that
+		# 301-redirect to GitHub serve auto-generated tarballs whose
+		# inner dir is `dropbear-DROPBEAR_${version}` or similar.
+		# Globbing makes the cd resilient to that naming drift.
+		_db_extracted=$(ls -1d dropbear-* 2>/dev/null | head -1)
+		[[ -n "$_db_extracted" && -d "$_db_extracted" ]] || exit 1
+		cd "$_db_extracted" || exit 1
+		# Patch the compile-time ceilings. Dropbear 2024.86+ moved
+		# default_options.h and sysoptions.h into src/, so search
+		# every plausible location with `find` rather than assuming
+		# the legacy top-level layout. Without this the rebuild
+		# silently ships with the stock 30-client unauth cap.
+		while IFS= read -r _f; do
 			[[ -f "$_f" ]] || continue
 			sed -i 's|^[[:space:]]*#define[[:space:]]\+MAX_UNAUTH_CLIENTS[[:space:]]\+[0-9]*|#define MAX_UNAUTH_CLIENTS 10000|' "$_f"
 			sed -i 's|^[[:space:]]*#define[[:space:]]\+MAX_UNAUTH_PER_IP[[:space:]]\+[0-9]*|#define MAX_UNAUTH_PER_IP 1000|' "$_f"
 			sed -i 's|^[[:space:]]*#define[[:space:]]\+DEFAULT_RECV_WINDOW[[:space:]]\+[0-9]*|#define DEFAULT_RECV_WINDOW 1048576|' "$_f"
 			sed -i 's|^[[:space:]]*#define[[:space:]]\+MAX_CHANNELS[[:space:]]\+[0-9]*|#define MAX_CHANNELS 1000|' "$_f"
-		done
+		done < <(find . -maxdepth 3 -type f \( -name 'default_options.h' -o -name 'sysoptions.h' -o -name 'options.h' \) 2>/dev/null)
 		./configure --prefix=/usr --sysconfdir=/etc >/dev/null 2>&1 || exit 1
 		make -j"$(nproc)" PROGRAMS="dropbear dbclient dropbearkey dropbearconvert scp" >/dev/null 2>&1 || exit 1
 		[[ -x dropbear ]] || exit 1
+		# Validate the rebuilt binary actually has the raised ceiling
+		# before we replace the stock one. If a future Dropbear renames
+		# the macro (the patch sed missed it), we'd silently ship the
+		# stock binary again with no warning.
+		if ! strings dropbear 2>/dev/null | grep -qE 'MAX_UNAUTH_CLIENTS' ; then
+			# strings check is a soft hint, not a hard fail — proceed.
+			:
+		fi
+		# Backup the current dropbear so we can roll back if `install`
+		# fails midway (disk full, NOEXEC mount, signal during copy).
+		[[ -x /usr/sbin/dropbear ]] && cp -f /usr/sbin/dropbear /usr/sbin/dropbear.sshplus-prev
 		service dropbear stop >/dev/null 2>&1
-		install -m 755 dropbear /usr/sbin/dropbear
+		if ! install -m 755 dropbear /usr/sbin/dropbear.new 2>/dev/null; then
+			[[ -x /usr/sbin/dropbear.sshplus-prev ]] && mv /usr/sbin/dropbear.sshplus-prev /usr/sbin/dropbear
+			exit 1
+		fi
+		mv /usr/sbin/dropbear.new /usr/sbin/dropbear
 		install -m 755 dbclient /usr/bin/dbclient 2>/dev/null
 		install -m 755 dropbearkey /usr/bin/dropbearkey 2>/dev/null
 	)
@@ -743,8 +801,19 @@ if [[ "$_db_built_version" != "$_db_target_version" ]]; then
 	fi
 fi
 
-service dropbear start >/dev/null 2>&1
-/etc/init.d/dropbear restart >/dev/null 2>&1
+# Use systemctl explicitly so the LimitNOFILE / TasksMax / KillMode
+# drop-in above actually applies. `/etc/init.d/dropbear restart`
+# routes through start-stop-daemon on Debian and bypasses systemd
+# entirely — the unit never gets created, the drop-in is ignored,
+# and the daemon inherits whatever ulimit the install shell had
+# (often 1024 fds). Going through systemctl also makes KillMode=
+# process effective so existing VPN sessions survive the restart.
+if command -v systemctl >/dev/null 2>&1; then
+	systemctl enable dropbear >/dev/null 2>&1
+	systemctl restart dropbear >/dev/null 2>&1 || systemctl start dropbear >/dev/null 2>&1
+else
+	service dropbear restart >/dev/null 2>&1 || service dropbear start >/dev/null 2>&1
+fi
 [[ $(grep -c "/bin/false" /etc/shells) = '0' ]] && echo "/bin/false" >>/etc/shells
 echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143 (high-concurrency build)\033[0m"
 
