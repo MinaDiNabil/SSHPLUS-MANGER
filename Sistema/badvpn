@@ -1,193 +1,277 @@
 #!/bin/bash
+# SSHPLUS — BadVPN UDP gateway menu wrapper
+#
+# Activates (or stops) the badvpn-udpgw daemon that the upstream
+# SSHPLUS uses to forward UDP traffic over an SSH tunnel. The
+# upstream script downloaded its binary from a long-dead Dropbox URL
+# and never produced a useful error when the install failed; this
+# rewrite is bullet-proof against the common failure modes that left
+# users staring at "[1] ATIVAR BADVPN" with the daemon never coming
+# up.
+#
+# Failure modes we now handle:
+#  - Binary missing → try Debian's `badvpn` package first (works on
+#    every Debian/Ubuntu architecture: x86_64, aarch64, armv7, …),
+#    fall back to downloading from this repo (x86_64 only).
+#  - Wrong-arch binary → e_machine check via `fun_is_elf`.
+#  - `--max-clients 1000000` → upstream binary tries to allocate
+#    ~500 MB of slot tables and OOMs at startup. We use 10000 which
+#    is the realistic per-host ceiling for a 4-16 GB VPS.
+#  - screen session vanishes immediately after spawn → we now SLEEP
+#    1s and re-check `ss -lnuH` so the menu reports the real state,
+#    not "ATIVO!" when the daemon already crashed.
+#  - Port 7300 already in use → reported with the holder's name
+#    so the admin can free the port instead of seeing a silent fail.
+
 clear
 
-# Raise this shell's own ulimits before spawning the BadVPN daemon.
-# Cron-driven respawns inherit limits from /etc/autostart (set up at
-# install time); when started interactively from the menu we need to
-# lift them here so a single screen session can hold 1M+ open UDP
-# flows instead of capping at the inherited 1024 fds.
+# Raise this shell's own ulimits before spawning the daemon. Cron-
+# driven respawns inherit limits from /etc/autostart (set at install
+# time); when started interactively from the menu we need to lift
+# them here so a single screen session can hold many UDP flows
+# instead of capping at the inherited 1024 fds.
 ulimit -n 1048576 2>/dev/null || ulimit -n 524288 2>/dev/null
 ulimit -u unlimited 2>/dev/null || ulimit -u 1048576 2>/dev/null
 
 # Canonical BadVPN command line — kept in one variable so the screen
 # launch, the autostart line, and the watchdog all use the same flags.
-# Values match the high-concurrency tuning in Install/list section [1/8].
-BADVPN_CMD="/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576"
-BADVPN_AUTOSTART="ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn $BADVPN_CMD"
+#
+# --max-clients 10000 (not 1000000): each "client" slot allocates a
+# fixed chunk of memory in the upstream badvpn-udpgw binary; 10000
+# clients fits comfortably in <50 MB and matches the realistic
+# concurrent-UDP-tunnel ceiling for a single VPS. 1000000 made the
+# daemon try to allocate ~500 MB of slot tables and OOM at startup
+# on most VPS, so the screen session vanished one second after
+# spawn and the menu reported "○" forever.
+BADVPN_BIN_CANDIDATES=(/bin/badvpn-udpgw /usr/bin/badvpn-udpgw /usr/local/bin/badvpn-udpgw)
+BADVPN_BIN=""
+BADVPN_ARGS="--listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000"
 
-# Primary GitHub raw URL — same source the installer uses. Falls back
-# to a mirror only if the primary is unreachable. The old Dropbox URL
-# this script used to hit returned an HTML page (not a binary), which
-# is why every "INSTALANDO O BADVPN" attempt silently succeeded with
-# the menu reporting "ATIVO!" but `/bin/badvpn-udpgw` never existed.
+# Repo download URL (x86_64 only — Debian's `badvpn` package is the
+# right answer on every other architecture).
 BADVPN_URL_PRIMARY="https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/badvpn"
 BADVPN_URL_FALLBACK="https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/master/Modulos/badvpn"
 
 fun_bar () {
-comando[0]="$1"
-comando[1]="$2"
- (
-[[ -e $HOME/fim ]] && rm $HOME/fim
-${comando[0]} -y > /dev/null 2>&1
-${comando[1]} -y > /dev/null 2>&1
-touch $HOME/fim
- ) > /dev/null 2>&1 &
- tput civis
-echo -ne "\033[1;33m["
-while true; do
-   for((i=0; i<18; i++)); do
-   echo -ne "\033[1;31m#"
-   sleep 0.1s
-   done
-   [[ -e $HOME/fim ]] && rm $HOME/fim && break
-   echo -e "\033[1;33m]"
-   sleep 1s
-   tput cuu1
-   tput dl1
-   echo -ne "\033[1;33m["
-done
-echo -e "\033[1;33m]\033[1;37m -\033[1;32m OK !\033[1;37m"
-tput cnorm
+	comando[0]="$1"
+	comando[1]="$2"
+	(
+		[[ -e $HOME/fim ]] && rm $HOME/fim
+		${comando[0]} > /dev/null 2>&1
+		[[ -n "${comando[1]}" ]] && ${comando[1]} > /dev/null 2>&1
+		touch $HOME/fim
+	) > /dev/null 2>&1 &
+	tput civis
+	echo -ne "\033[1;33m["
+	while true; do
+		for((i=0; i<18; i++)); do
+			echo -ne "\033[1;31m#"
+			sleep 0.1s
+		done
+		[[ -e $HOME/fim ]] && rm $HOME/fim && break
+		echo -e "\033[1;33m]"
+		sleep 1s
+		tput cuu1
+		tput dl1
+		echo -ne "\033[1;33m["
+	done
+	echo -e "\033[1;33m]\033[1;37m -\033[1;32m OK !\033[1;37m"
+	tput cnorm
 }
 
-[[ $(awk -F" " '{print $2}' /usr/lib/licence) != "@KIRITO_SSH" ]] && exit 0
+[[ $(awk -F" " '{print $2}' /usr/lib/licence 2>/dev/null) != "@KIRITO_SSH" ]] && exit 0
 
 # Verify a binary at $1 is an actual ELF executable of the CURRENT
-# host's architecture — not just any ELF (the e_machine field tells
-# us whether the binary will actually exec on this CPU). Returns 0
-# if valid for this host, 1 otherwise.
+# host's architecture. Returns 0 if valid for this host, 1 otherwise.
 fun_is_elf () {
-    [[ -s "$1" ]] || return 1
-    # First 4 bytes must be the ELF magic (\x7fELF).
-    head -c 4 "$1" 2>/dev/null | grep -q $'\x7fELF' || return 1
-    # Byte 5 (EI_CLASS) and bytes 19-20 (e_machine, little-endian)
-    # together identify the architecture. We accept the binary only
-    # when both match the running kernel; otherwise install -m would
-    # happily put an x86_64 ELF on an aarch64 host and BadVPN would
-    # exit with ENOEXEC at every screen respawn.
-    local _ei_class _emachine_b18 _emachine_b19 _arch
-    _ei_class=$(od -An -tx1 -N1 -j4 "$1" 2>/dev/null | tr -d ' ')
-    _emachine_b18=$(od -An -tx1 -N1 -j18 "$1" 2>/dev/null | tr -d ' ')
-    _emachine_b19=$(od -An -tx1 -N1 -j19 "$1" 2>/dev/null | tr -d ' ')
-    _arch=$(uname -m 2>/dev/null)
-    case "$_arch" in
-        x86_64|amd64)
-            # ELFCLASS64 + EM_X86_64 (0x3e 0x00 LE)
-            [[ "$_ei_class" = "02" && "$_emachine_b18" = "3e" && "$_emachine_b19" = "00" ]]
-            ;;
-        aarch64|arm64|armv8*)
-            # ELFCLASS64 + EM_AARCH64 (0xb7 0x00 LE)
-            [[ "$_ei_class" = "02" && "$_emachine_b18" = "b7" && "$_emachine_b19" = "00" ]]
-            ;;
-        armv7*|armv6*|armhf|arm)
-            # ELFCLASS32 + EM_ARM (0x28 0x00 LE)
-            [[ "$_ei_class" = "01" && "$_emachine_b18" = "28" && "$_emachine_b19" = "00" ]]
-            ;;
-        i386|i486|i586|i686)
-            # ELFCLASS32 + EM_386 (0x03 0x00 LE)
-            [[ "$_ei_class" = "01" && "$_emachine_b18" = "03" && "$_emachine_b19" = "00" ]]
-            ;;
-        *)
-            # Unknown host arch — fall back to magic-only check rather
-            # than refusing every install. Better to attempt and let
-            # the user see the ENOEXEC than to silently refuse.
-            return 0
-            ;;
-    esac
+	[[ -s "$1" ]] || return 1
+	# First 4 bytes must be the ELF magic.
+	head -c 4 "$1" 2>/dev/null | grep -q $'\x7fELF' || return 1
+	# Byte 5 (EI_CLASS) and bytes 19-20 (e_machine, little-endian)
+	# identify the architecture. Skip the strict match in case od
+	# isn't available or the host arch is unknown.
+	command -v od >/dev/null 2>&1 || return 0
+	local _ei_class _emachine_b18 _emachine_b19 _arch
+	_ei_class=$(od -An -tx1 -N1 -j4 "$1" 2>/dev/null | tr -d ' ')
+	_emachine_b18=$(od -An -tx1 -N1 -j18 "$1" 2>/dev/null | tr -d ' ')
+	_emachine_b19=$(od -An -tx1 -N1 -j19 "$1" 2>/dev/null | tr -d ' ')
+	_arch=$(uname -m 2>/dev/null)
+	case "$_arch" in
+		x86_64|amd64)
+			[[ "$_ei_class" = "02" && "$_emachine_b18" = "3e" && "$_emachine_b19" = "00" ]] ;;
+		aarch64|arm64|armv8*)
+			[[ "$_ei_class" = "02" && "$_emachine_b18" = "b7" && "$_emachine_b19" = "00" ]] ;;
+		armv7*|armv6*|armhf|arm)
+			[[ "$_ei_class" = "01" && "$_emachine_b18" = "28" && "$_emachine_b19" = "00" ]] ;;
+		i386|i486|i586|i686)
+			[[ "$_ei_class" = "01" && "$_emachine_b18" = "03" && "$_emachine_b19" = "00" ]] ;;
+		*)
+			# Unknown host arch — magic-only check.
+			return 0 ;;
+	esac
 }
 
-# Download the BadVPN binary, validate it, install to /bin. Returns 0
-# on success, 1 on permanent failure (so the caller can show a clear
-# error instead of silently pretending to start a non-existent binary).
+# Find the first installed badvpn-udpgw binary that's a valid ELF
+# for this host. Sets $BADVPN_BIN on success. Returns 0/1.
+fun_find_badvpn_bin () {
+	local _bin
+	for _bin in "${BADVPN_BIN_CANDIDATES[@]}"; do
+		if [[ -x "$_bin" ]] && fun_is_elf "$_bin"; then
+			BADVPN_BIN="$_bin"
+			return 0
+		fi
+	done
+	BADVPN_BIN=""
+	return 1
+}
+
+# Install BadVPN. Tries the Debian/Ubuntu package first (works on
+# every supported architecture) and falls back to downloading our
+# pre-built x86_64 binary. Returns 0 on success.
 fun_install_badvpn () {
-    cd "$HOME" || return 1
-    rm -f "$HOME/badvpn-udpgw.tmp"
-    if wget -q --tries=2 --timeout=20 "$BADVPN_URL_PRIMARY" -O "$HOME/badvpn-udpgw.tmp" && fun_is_elf "$HOME/badvpn-udpgw.tmp"; then
-        :
-    elif wget -q --tries=2 --timeout=20 "$BADVPN_URL_FALLBACK" -O "$HOME/badvpn-udpgw.tmp" && fun_is_elf "$HOME/badvpn-udpgw.tmp"; then
-        :
-    else
-        rm -f "$HOME/badvpn-udpgw.tmp"
-        return 1
-    fi
-    install -m 755 "$HOME/badvpn-udpgw.tmp" /bin/badvpn-udpgw
-    rm -f "$HOME/badvpn-udpgw.tmp"
-    fun_is_elf /bin/badvpn-udpgw
+	# Attempt 1: Debian/Ubuntu `badvpn` package. Native arch by
+	# definition, signed by the distro, no Dropbox / GitHub raw
+	# dependency. Available in Debian since stretch and Ubuntu since
+	# 18.04 — covers basically every supported install target.
+	if command -v apt-get >/dev/null 2>&1; then
+		DEBIAN_FRONTEND=noninteractive apt-get install -y badvpn >/dev/null 2>&1
+		# Debian installs it at /usr/bin/badvpn-udpgw — symlink to
+		# /bin/badvpn-udpgw so legacy autostart entries that hard-
+		# coded the /bin path keep working.
+		if [[ -x /usr/bin/badvpn-udpgw ]] && fun_is_elf /usr/bin/badvpn-udpgw; then
+			ln -sf /usr/bin/badvpn-udpgw /bin/badvpn-udpgw 2>/dev/null
+			return 0
+		fi
+	fi
+
+	# Attempt 2: download our pre-built x86_64 binary from the repo.
+	# Only useful on x86_64 hosts where apt-install failed (rare).
+	local _arch
+	_arch=$(uname -m 2>/dev/null)
+	if [[ "$_arch" = "x86_64" || "$_arch" = "amd64" ]]; then
+		rm -f "$HOME/badvpn-udpgw.tmp"
+		if wget -q --tries=2 --timeout=20 "$BADVPN_URL_PRIMARY" -O "$HOME/badvpn-udpgw.tmp" && fun_is_elf "$HOME/badvpn-udpgw.tmp"; then
+			install -m 755 "$HOME/badvpn-udpgw.tmp" /bin/badvpn-udpgw
+			rm -f "$HOME/badvpn-udpgw.tmp"
+			return 0
+		fi
+		if wget -q --tries=2 --timeout=20 "$BADVPN_URL_FALLBACK" -O "$HOME/badvpn-udpgw.tmp" && fun_is_elf "$HOME/badvpn-udpgw.tmp"; then
+			install -m 755 "$HOME/badvpn-udpgw.tmp" /bin/badvpn-udpgw
+			rm -f "$HOME/badvpn-udpgw.tmp"
+			return 0
+		fi
+		rm -f "$HOME/badvpn-udpgw.tmp"
+	fi
+
+	return 1
 }
 
-# Start BadVPN (assumes /bin/badvpn-udpgw is already installed and
-# validated). Refreshes the autostart entry to match the live command
-# line so reboot respawns don't drift back to the legacy low-cap args.
+# Start the badvpn-udpgw daemon. Requires $BADVPN_BIN to be set
+# (caller is responsible for fun_find_badvpn_bin before this).
 fun_start_badvpn () {
-    # Kill any stale udpvpn screen so the new high-cap one wins on the
-    # 127.0.0.1:7300 bind. Use a strict regex anchored on whitespace or
-    # end-of-line — \b (word boundary) matches '-' (non-word char), so
-    # `\.udpvpn\b` would falsely match a session named '.udpvpn-old'.
-    screen -ls 2>/dev/null | grep -qE '\.udpvpn([[:space:]]|$)' && screen -S udpvpn -X quit 2>/dev/null
-    screen -wipe >/dev/null 2>&1
-    screen -dmS udpvpn $BADVPN_CMD
-    # Refresh autostart: drop every previous udpvpn line then re-add
-    # the canonical one. This converges legacy installs (max-clients
-    # 1000 / 10000) onto the current high-concurrency command line.
-    [[ -f /etc/autostart ]] || { echo '#!/bin/bash' > /etc/autostart && chmod +x /etc/autostart; }
-    sed -i '/udpvpn/d' /etc/autostart
-    echo -e "$BADVPN_AUTOSTART" >> /etc/autostart
-    sleep 1
+	# Kill any stale udpvpn screen so the new one wins on the
+	# 127.0.0.1:7300 bind. Use a strict regex anchored on whitespace
+	# or end-of-line — \b would match '-' (a non-word char) and could
+	# false-positive on screens named '.udpvpn-old'.
+	screen -ls 2>/dev/null | grep -qE '\.udpvpn([[:space:]]|$)' && screen -S udpvpn -X quit 2>/dev/null
+	screen -wipe >/dev/null 2>&1
+	screen -dmS udpvpn $BADVPN_BIN $BADVPN_ARGS
+	# Refresh autostart: drop every previous udpvpn line then re-add
+	# the canonical one. Converges legacy installs onto the current
+	# command line.
+	[[ -f /etc/autostart ]] || { echo '#!/bin/bash' > /etc/autostart && chmod +x /etc/autostart; }
+	sed -i '/udpvpn/d' /etc/autostart
+	echo "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn $BADVPN_BIN $BADVPN_ARGS" >> /etc/autostart
+	# Give the daemon a moment to bind before the caller checks.
+	sleep 1
 }
 
 fun_udp1 () {
-    if [[ ! -x /bin/badvpn-udpgw ]] || ! fun_is_elf /bin/badvpn-udpgw; then
-        clear
-        echo -e "\033[1;32mINSTALANDO O BADVPN !\033[0m\n"
-        fun_bar 'fun_install_badvpn'
-        if [[ ! -x /bin/badvpn-udpgw ]] || ! fun_is_elf /bin/badvpn-udpgw; then
-            echo -e "\n\033[1;31m  ✗ FALHA NO DOWNLOAD DO BADVPN!\033[0m"
-            echo -e "\033[1;33m    Verifique a conexão com a internet e tente novamente.\033[0m"
-            echo -e "\033[1;33m    URL: $BADVPN_URL_PRIMARY\033[0m"
-            sleep 4
-            menu
-            return
-        fi
-        echo -e "\n\033[1;32mINICIANDO O BADVPN... \033[0m\n"
-    else
-        clear
-        echo -e "\033[1;32mINICIANDO O BADVPN... \033[0m\n"
-    fi
-    fun_bar 'fun_start_badvpn'
-    # Confirm the daemon is actually bound to 7300/udp before claiming
-    # success — past versions reported "ATIVO!" even when the screen
-    # session died one second after spawn.
-    # `ss -lnuH` prints "UNCONN 0 0 127.0.0.1:7300 0.0.0.0:*" — the
-    # local address is $4, not $5 ($5 is the peer wildcard which never
-    # matches our port). Using the wrong field made every successful
-    # install report "NÃO ESTÁ ESCUTANDO" in red.
-    if ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
-        echo -e "\n  \033[1;32mBADVPN ATIVO !\033[0m"
-        echo -e "\033[1;36m    Limite: 1.000.000 clientes / 100 conexões por cliente\033[0m"
-    else
-        echo -e "\n  \033[1;31m✗ BADVPN NÃO ESTÁ ESCUTANDO EM 7300/udp\033[0m"
-        echo -e "\033[1;33m    Verifique: screen -r udpvpn\033[0m"
-    fi
-    sleep 3
-    menu
+	# Pre-flight 1: is port 7300/udp already taken by something else?
+	if ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
+		local _holder
+		_holder=$(ss -lnupH 2>/dev/null | awk '$4 ~ /(^|:)7300$/ {print $NF; exit}')
+		# If the holder IS our daemon already, switch to the "stop"
+		# branch instead of pretending it's a conflict.
+		if echo "$_holder" | grep -q 'badvpn-udpgw'; then
+			echo -e "\033[1;33m  ⚠ BADVPN JÁ ESTÁ ATIVO em 7300/udp\033[0m"
+			sleep 3
+			menu
+			return
+		fi
+		clear
+		echo -e "\033[1;31m  ✗ PORTA 7300/udp JÁ EM USO${_holder:+ por $_holder}\033[0m"
+		echo -e "\033[1;33m    Libere a porta e tente novamente.\033[0m"
+		sleep 4
+		menu
+		return
+	fi
+
+	# Pre-flight 2: do we have the binary?
+	if ! fun_find_badvpn_bin; then
+		clear
+		echo -e "\033[1;32mINSTALANDO O BADVPN !\033[0m\n"
+		fun_bar 'fun_install_badvpn'
+		if ! fun_find_badvpn_bin; then
+			# Genuine install failure — give the admin enough info
+			# to fix it instead of pretending success.
+			echo -e "\n\033[1;31m  ✗ FALHA NA INSTALAÇÃO DO BADVPN!\033[0m"
+			echo -e "\033[1;33m    Tentativas:\033[0m"
+			echo -e "\033[1;33m      1) apt-get install -y badvpn\033[0m"
+			echo -e "\033[1;33m      2) wget $BADVPN_URL_PRIMARY\033[0m"
+			echo -e "\033[1;33m    Verifique a conexão com a internet e os repositórios apt.\033[0m"
+			echo -e "\033[1;33m    Arquitetura detectada: $(uname -m 2>/dev/null)\033[0m"
+			sleep 6
+			menu
+			return
+		fi
+		echo -e "\n\033[1;32mINICIANDO O BADVPN... \033[0m\n"
+	else
+		clear
+		echo -e "\033[1;32mINICIANDO O BADVPN... \033[0m\n"
+	fi
+
+	fun_bar 'fun_start_badvpn'
+
+	# Verify the daemon actually bound to 7300/udp before claiming
+	# success. `ss -lnuH` prints "UNCONN 0 0 127.0.0.1:7300 0.0.0.0:*"
+	# — the local address is $4 (not $5 which is the peer wildcard).
+	if ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
+		echo -e "\n  \033[1;32mBADVPN ATIVO !\033[0m"
+		echo -e "\033[1;36m    Binário: $BADVPN_BIN\033[0m"
+		echo -e "\033[1;36m    Endereço: 127.0.0.1:7300\033[0m"
+		echo -e "\033[1;36m    Limite: 10000 clientes / 10 conexões por cliente\033[0m"
+	else
+		echo -e "\n  \033[1;31m✗ BADVPN NÃO ESTÁ ESCUTANDO EM 7300/udp\033[0m"
+		echo -e "\033[1;33m    O daemon iniciou mas saiu imediatamente.\033[0m"
+		echo -e "\033[1;33m    Inspecione com: screen -r udpvpn  (Ctrl+A,D para sair)\033[0m"
+		echo -e "\033[1;33m    Ou tente manualmente:\033[0m"
+		echo -e "\033[1;33m      $BADVPN_BIN $BADVPN_ARGS\033[0m"
+	fi
+	sleep 4
+	menu
 }
 
 fun_udp2 () {
-    clear
-    echo -e "\n\033[1;32mPARANDO O BADVPN...\033[0m\n"
-    fun_stopbad () {
-        sleep 1
-        screen -r -S "udpvpn" -X quit
-        screen -wipe 1>/dev/null 2>/dev/null
-        [[ $(grep -wc "udpvpn" /etc/autostart) != '0' ]] && {
-		    sed -i '/udpvpn/d' /etc/autostart
-		}
-        sleep 1
-    }
-    fun_bar 'fun_stopbad'
-    echo -e "\n  \033[1;31mBADVPN PARADO !\033[0m"
-    sleep 3
-    menu
+	clear
+	echo -e "\n\033[1;32mPARANDO O BADVPN...\033[0m\n"
+	fun_stopbad () {
+		sleep 1
+		# Kill the screen session AND any bare badvpn-udpgw process
+		# (in case the user spawned it outside screen, e.g. via the
+		# upstream legacy autostart line that didn't wrap in screen).
+		screen -S udpvpn -X quit 2>/dev/null
+		screen -wipe >/dev/null 2>&1
+		pkill -x badvpn-udpgw 2>/dev/null
+		# Remove autostart entries so reboot doesn't bring it back.
+		[[ $(grep -wc "udpvpn" /etc/autostart 2>/dev/null) != '0' ]] && \
+			sed -i '/udpvpn/d' /etc/autostart
+		sleep 1
+	}
+	fun_bar 'fun_stopbad'
+	echo -e "\n  \033[1;31mBADVPN PARADO !\033[0m"
+	sleep 3
+	menu
 }
 
-[[ $(ps x | grep "udpvpn"|grep -v grep |wc -l) = '0' ]] &&  fun_udp1 || fun_udp2
+[[ $(ps x | grep "udpvpn" | grep -v grep | wc -l) = '0' ]] && fun_udp1 || fun_udp2

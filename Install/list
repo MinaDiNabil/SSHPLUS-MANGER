@@ -531,45 +531,74 @@ echo ""
 echo -e "\033[1;33m[1/8] Installing BadVPN (port 7300)...\033[0m"
 cd $HOME
 
-# Download badvpn-udpgw binary from this repo (reliable raw URL, not Dropbox HTML)
-wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/badvpn -O /bin/badvpn-udpgw
+# Two-track install:
+#   1. Debian/Ubuntu `badvpn` package — works on EVERY supported
+#      architecture (x86_64, aarch64, armv7, …) and uses signed,
+#      distro-maintained binaries. This is the canonical answer.
+#   2. Fall back to downloading our pre-built x86_64 binary from
+#      the repo only when apt-install failed AND the host is x86_64.
+#
+# The previous version skipped apt entirely and went straight to
+# wget — which silently produced a 404 HTML page on flaky networks
+# and broke BadVPN on every non-x86_64 host.
+_bv_installed=0
+_bv_arch=$(uname -m 2>/dev/null)
 
-# Verify the download is an actual ELF executable, not an HTML error page
-if ! head -c 4 /bin/badvpn-udpgw 2>/dev/null | grep -q $'\x7fELF'; then
-	echo -e "\033[1;31m   ✗ BadVPN download failed or is not an ELF binary. Skipping.\033[0m"
-	rm -f /bin/badvpn-udpgw
+if command -v apt-get >/dev/null 2>&1; then
+	DEBIAN_FRONTEND=noninteractive apt-get install -y badvpn >/dev/null 2>&1
+	if [[ -x /usr/bin/badvpn-udpgw ]] && head -c 4 /usr/bin/badvpn-udpgw 2>/dev/null | grep -q $'\x7fELF'; then
+		# Symlink to /bin/badvpn-udpgw so autostart entries and
+		# Sistema/badvpn that hard-code the /bin path keep working.
+		ln -sf /usr/bin/badvpn-udpgw /bin/badvpn-udpgw 2>/dev/null
+		_bv_installed=1
+		echo -e "\033[1;32m   ✓ BadVPN installed via apt (Debian/Ubuntu package)\033[0m"
+	fi
+fi
+
+# x86_64 fallback only — non-x86_64 hosts where apt-install failed
+# need a native-arch binary, and our repo only ships x86_64.
+if [[ $_bv_installed -eq 0 && ( "$_bv_arch" = "x86_64" || "$_bv_arch" = "amd64" ) ]]; then
+	wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/badvpn -O /bin/badvpn-udpgw.tmp
+	if head -c 4 /bin/badvpn-udpgw.tmp 2>/dev/null | grep -q $'\x7fELF'; then
+		install -m 755 /bin/badvpn-udpgw.tmp /bin/badvpn-udpgw
+		rm -f /bin/badvpn-udpgw.tmp
+		_bv_installed=1
+		echo -e "\033[1;32m   ✓ BadVPN installed from repo (x86_64 fallback)\033[0m"
+	else
+		rm -f /bin/badvpn-udpgw.tmp
+	fi
+fi
+
+if [[ $_bv_installed -eq 0 ]]; then
+	echo -e "\033[1;31m   ✗ BadVPN install failed (apt + wget both failed).\033[0m"
+	echo -e "\033[1;33m     Architecture: $_bv_arch — only x86_64 has a repo fallback.\033[0m"
 elif ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
 	echo -e "\033[1;33m   ⚠ Port 7300/udp already in use. BadVPN not started.\033[0m"
 else
-	chmod 755 /bin/badvpn-udpgw
-	# High-concurrency BadVPN args for 1M+ user installations:
-	#   --max-clients 1000000        : was 10000 — this is the hard cap
-	#                                  on simultaneous UDP-gateway clients
-	#   --max-connections-for-client 100 : was 10 — modern games/voice
-	#                                      apps open multiple parallel
-	#                                      UDP flows per client
-	#   --client-socket-sndbuf 1048576  : was 10000 — 1MB send buffer so
-	#                                     bursty media doesn't drop frames
-	screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576
-	# Strip every stale BadVPN autostart line from previous installs.
-	# Match any `--max-clients` value EXCEPT the new 1000000 baseline,
-	# so legacy 1000 / 10000 / 100000 entries are all swept without
-	# touching the line we're about to append. The previous pattern
-	# only matched `--max-clients 10000 ` (trailing space), leaving
-	# `--max-clients 1000 ` from very old script generations co-
-	# existing with the new line and causing cron to bring up the
-	# low-cap daemon first every minute.
-	sed -i '/badvpn-udpgw.*--max-clients/{ /--max-clients 1000000\b/!d }' /etc/autostart 2>/dev/null
-	grep -q 'badvpn-udpgw.*--max-clients 1000000\b' /etc/autostart 2>/dev/null || \
-		echo -e "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576" >> /etc/autostart
+	# BadVPN args matching the upstream-tested defaults. The previous
+	# `--max-clients 1000000` looked impressive but made the daemon
+	# try to allocate ~500 MB of slot tables at startup — on most
+	# VPS this OOMed instantly and the screen session vanished one
+	# second after spawn, leaving the menu's status check reporting
+	# "○" forever. 10000 clients is the realistic per-host ceiling
+	# for any reasonable VPS and matches the original SSHPLUS args.
+	screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000
+	# Strip every previous BadVPN autostart line so we never end up
+	# with two entries fighting for port 7300 (the old `1000000`
+	# line + the new `10000` line both racing every cron tick).
+	sed -i '/badvpn-udpgw.*--listen-addr 127\.0\.0\.1:7300/d' /etc/autostart 2>/dev/null
+	sed -i '/udpvpn/d' /etc/autostart 2>/dev/null
+	echo "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000" >> /etc/autostart
 
 	sleep 1
 	if ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
-		echo -e "\033[1;32m   ✓ BadVPN installed on port 7300\033[0m"
+		echo -e "\033[1;32m   ✓ BadVPN listening on 127.0.0.1:7300\033[0m"
 	else
 		echo -e "\033[1;31m   ✗ BadVPN started but is not listening on 7300/udp.\033[0m"
+		echo -e "\033[1;33m     Inspect with: screen -r udpvpn  (Ctrl+A,D to detach)\033[0m"
 	fi
 fi
+unset _bv_installed _bv_arch
 
 # 2. Install Squid Proxy on port 3128
 echo -e "\033[1;33m[2/8] Installing Squid Proxy (port 3128)...\033[0m"

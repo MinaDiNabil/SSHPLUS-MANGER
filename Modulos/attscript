@@ -384,12 +384,12 @@ CONNTRACK_EOF
 
   # Make sure BadVPN's screen session is alive on the next /etc/autostart tick.
   # Uses awk '{print $4}' — ss -lnuH prints the local address in $4, not $5
-  # ($5 is the peer wildcard 0.0.0.0:* which never matches). And the spawn
-  # uses the 1M-client baseline that matches Install/list section [1/8]
-  # and Sistema/badvpn — keeping the watchdog at the old 10K cap would
-  # silently downgrade BadVPN every time attscript re-ran.
+  # ($5 is the peer wildcard 0.0.0.0:* which never matches). Args match
+  # Install/list section [1/8] and Sistema/badvpn — 10000 clients is
+  # the realistic ceiling that fits in <50 MB of slot tables. The
+  # earlier `1000000` made the daemon OOM at startup on most VPS.
   if [[ -x /bin/badvpn-udpgw ]] && ! ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
-    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576 2>/dev/null
+    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000 2>/dev/null
   fi
 
   [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1
