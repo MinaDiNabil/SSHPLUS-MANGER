@@ -1,2 +1,11 @@
 __pycache__/
 *.pyc
+
+# Stray package / tarball downloads from inspection scripts. These
+# show up when a debugging session does `apt-get download` or `wget`
+# into the repo root; we never want to commit them.
+*.deb
+*.udeb
+*.tar.bz2
+*.tar.gz
+*.tar.xz

@@ -92,9 +92,14 @@ fun_force_update () {
   [[ ! -d "$src/Modulos" ]] && { cd "$HOME"; rm -rf "$tmpdir"; return 1; }
 
   # Modules that live in /bin/ and are invoked directly by the menu.
+  # "badvpn" is intentionally absent — Modulos/badvpn is the udpgw
+  # ELF binary, not the menu wrapper. Copying it here would overwrite
+  # /bin/badvpn with the binary and break the "[1] ATIVAR BADVPN"
+  # menu option (silent failure: the binary runs with no args and
+  # exits). The wrapper is copied from Sistema/badvpn after this loop.
   local _mdls=(addhost delhost alterarsenha criarusuario expcleaner \
                mudardata remover criarteste verifbot droplimiter \
-               alterarlimite ajuda sshmonitor badvpn userbackup \
+               alterarlimite ajuda sshmonitor userbackup \
                instsqd blockt otimizar menu speedtest banner \
                senharoot reiniciarservicos reiniciarsistema attscript \
                conexao delscript detalhes botssh infousers verifatt \
@@ -108,6 +113,48 @@ fun_force_update () {
       chmod +x "/bin/$_arq"
     fi
   done
+
+  # BadVPN menu wrapper from Sistema/. Overwrites any binary that an
+  # older attscript run mistakenly placed at /bin/badvpn.
+  if [[ -f "$src/Sistema/badvpn" ]] && head -n1 "$src/Sistema/badvpn" 2>/dev/null | grep -q '^#!/bin/bash'; then
+    cp -f "$src/Sistema/badvpn" /bin/badvpn
+    dos2unix /bin/badvpn 2>/dev/null
+    chmod +x /bin/badvpn
+  fi
+
+  # BadVPN binary from Modulos/. The udpgw daemon itself lives at
+  # /bin/badvpn-udpgw; refresh it whenever the upstream binary changes
+  # so a fresh attscript run also picks up any binary update.
+  #
+  # CRITICAL: Modulos/badvpn in the repo is an x86_64 ELF. The
+  # previous version of this check only validated the leading 4 bytes
+  # (ELF magic) which match ANY architecture — running attscript on
+  # an aarch64 host would silently overwrite the working ARM binary
+  # with a useless x86_64 one, and the next BadVPN respawn would die
+  # with ENOEXEC. Verify the EM_X86_64 e_machine field (byte 18 =
+  # 0x3e, byte 19 = 0x00) before installing, and only proceed if the
+  # current host is actually x86_64.
+  if [[ -f "$src/Modulos/badvpn" ]] && head -c 4 "$src/Modulos/badvpn" 2>/dev/null | grep -q $'\x7fELF'; then
+    local _host_arch _bv_b18 _bv_b19
+    _host_arch=$(uname -m 2>/dev/null)
+    _bv_b18=$(od -An -tx1 -N1 -j18 "$src/Modulos/badvpn" 2>/dev/null | tr -d ' ')
+    _bv_b19=$(od -An -tx1 -N1 -j19 "$src/Modulos/badvpn" 2>/dev/null | tr -d ' ')
+    case "$_host_arch" in
+      x86_64|amd64)
+        # EM_X86_64 = 0x3e 0x00 little-endian
+        if [[ "$_bv_b18" = "3e" && "$_bv_b19" = "00" ]]; then
+          install -m 755 "$src/Modulos/badvpn" /bin/badvpn-udpgw
+        fi
+        ;;
+      *)
+        # Wrong-arch binary in repo for this host — leave existing
+        # /bin/badvpn-udpgw alone. The user installed it via a
+        # platform-specific path (listARM, native build, etc.) and we
+        # must not clobber it with the x86_64 blob.
+        :
+        ;;
+    esac
+  fi
 
   # Helper files that live in /etc/SSHPlus/ (not run from /bin/).
   mkdir -p /etc/SSHPlus 2>/dev/null
@@ -184,14 +231,27 @@ fun_force_update () {
     # sshd:22 — that breaks WS SSL+Payload and WS SSL+Payload+Proxy.
     # Repoint at the wsproxy multiplexer on 127.0.0.1:700 and bring
     # the multiplexer up so a single 443 listener covers every mode.
+    # Backend is dropbear:110 (not sshd:22) — OpenSSH's 1000+ byte
+    # KEXINIT fragments badly through Cloudflare WebSocket, producing
+    # "Illegal packet size" on WS SSL+Payload modes. See Install/list
+    # section 4 for the full rationale.
     if grep -qE '^[[:space:]]*connect[[:space:]]*=[[:space:]]*127\.0\.0\.1:(22|80)[[:space:]]*$' /etc/stunnel/stunnel.conf; then
       sed -i 's|^[[:space:]]*connect[[:space:]]*=.*|connect = 127.0.0.1:700|' /etc/stunnel/stunnel.conf
     fi
-    if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-      screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
+    # Kill any sslmux still pointing at the legacy port-22 backend so the
+    # 700→110 target actually takes over on this attscript run.
+    if pgrep -af 'wsproxy\.py 700 22' >/dev/null 2>&1; then
+      for s in $(screen -ls 2>/dev/null | grep '\.sslmux' | awk '{print $1}'); do
+        screen -S "$s" -X quit 2>/dev/null
+      done
+      screen -wipe >/dev/null 2>&1
     fi
-    if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
-      echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22" >>/etc/autostart
+    sed -i '/wsproxy\.py 700 22/d' /etc/autostart 2>/dev/null
+    if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
+      screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1
+    fi
+    if ! grep -q 'wsproxy.py 700 110' /etc/autostart 2>/dev/null; then
+      echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110" >>/etc/autostart
     fi
 
     systemctl enable stunnel4 >/dev/null 2>&1
@@ -210,7 +270,7 @@ fun_force_update () {
   screen -wipe >/dev/null 2>&1
   sleep 1
   if [[ -x /etc/SSHPlus/wsproxy.py ]] && ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)700$'; then
-    screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
+    screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1
   fi
 
   # Refresh /etc/autostart with the unified watchdog + stunnel watchdog
@@ -281,29 +341,46 @@ LOGROTATE_EOF
     mkdir -p /var/log/sshplus
   fi
 
-  # Add conntrack + overcommit_memory to sysctl drop-in if missing.
-  if [[ -f /etc/sysctl.d/99-sshplus.conf ]] && ! grep -q 'nf_conntrack_max' /etc/sysctl.d/99-sshplus.conf; then
-    cat >>/etc/sysctl.d/99-sshplus.conf <<'CONNTRACK_EOF'
+  # Add or refresh conntrack + overcommit_memory to sysctl drop-in.
+  # Two phases:
+  #   1. Append the block if it's entirely missing (fresh install
+  #      that pre-dates the conntrack section).
+  #   2. Bump in-place when an older attscript wrote the old 1M/256K
+  #      ceilings — the install/list values are now 4M/1M to match
+  #      1M+ user installations, and the prior `grep -q` guard meant
+  #      legacy installs were frozen at the old caps forever.
+  if [[ -f /etc/sysctl.d/99-sshplus.conf ]]; then
+    if ! grep -q 'nf_conntrack_max' /etc/sysctl.d/99-sshplus.conf; then
+      cat >>/etc/sysctl.d/99-sshplus.conf <<'CONNTRACK_EOF'
 
-# --- Connection tracking (added by attscript upgrade) ---
-net.netfilter.nf_conntrack_max = 1048576
-net.nf_conntrack_max = 1048576
+# --- Connection tracking (added by attscript upgrade, sized for 1M+ users) ---
+net.netfilter.nf_conntrack_max = 4194304
+net.nf_conntrack_max = 4194304
 net.netfilter.nf_conntrack_tcp_timeout_established = 86400
 net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
-net.netfilter.nf_conntrack_buckets = 262144
+net.netfilter.nf_conntrack_buckets = 1048576
 vm.overcommit_memory = 1
 CONNTRACK_EOF
+    else
+      # Bump legacy 1M ceiling to 4M in-place
+      sed -i -E 's|^(net\.(netfilter\.)?nf_conntrack_max)[[:space:]]*=[[:space:]]*1048576[[:space:]]*$|\1 = 4194304|' /etc/sysctl.d/99-sshplus.conf
+      sed -i -E 's|^(net\.netfilter\.nf_conntrack_buckets)[[:space:]]*=[[:space:]]*262144[[:space:]]*$|\1 = 1048576|' /etc/sysctl.d/99-sshplus.conf
+    fi
     modprobe nf_conntrack 2>/dev/null
-    echo 262144 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+    echo 1048576 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
     sysctl --system >/dev/null 2>&1 || true
   fi
 
   # Register the daily proxy-restart cron entry that prevents long-term
   # memory creep in the Python proxies.
   if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
-    (crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
+    # Quit-and-respawn: chain `/etc/autostart` after the quit so the
+    # proxies come back within ~2 seconds instead of waiting up to
+    # 60s for the next per-minute autostart tick. Without this, every
+    # day at 04:00 SSL TUNNEL/SOCKS/WS users got dropped for a minute.
+    (crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\.(ws[0-9]*|sslmux(_[0-9]+)?|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done; sleep 2; /etc/autostart >/dev/null 2>&1 # SSHPLUS_PROXY_RESTART') | crontab -
   fi
 
   # Enable AUTO EXECUTION (menu;) on login if /etc/profile doesn't have it.
@@ -313,8 +390,13 @@ CONNTRACK_EOF
   fi
 
   # Make sure BadVPN's screen session is alive on the next /etc/autostart tick.
-  if [[ -x /bin/badvpn-udpgw ]] && ! ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
-    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000 2>/dev/null
+  # Uses awk '{print $4}' — ss -lnuH prints the local address in $4, not $5
+  # ($5 is the peer wildcard 0.0.0.0:* which never matches). And the spawn
+  # uses the 1M-client baseline that matches Install/list section [1/8]
+  # and Sistema/badvpn — keeping the watchdog at the old 10K cap would
+  # silently downgrade BadVPN every time attscript re-ran.
+  if [[ -x /bin/badvpn-udpgw ]] && ! ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
+    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576 2>/dev/null
   fi
 
   [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1

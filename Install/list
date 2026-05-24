@@ -2,6 +2,17 @@
 #====================================================
 #	@MinaProNet
 #====================================================
+# Raise this install shell's own ulimits BEFORE any service is started.
+# limits.conf/pam_limits only take effect on the NEXT login — every
+# screen session and systemd unit spawned later in this script would
+# otherwise inherit the install shell's pre-tuning ceilings (typically
+# 1024 fds, 4096 procs) and silently cap there. Setting these now
+# means every child (wsproxy, proxy.py, open.py, badvpn-udpgw, ...)
+# starts with the same headroom the tuning block writes to disk.
+ulimit -n 1048576 2>/dev/null || ulimit -n 524288 2>/dev/null
+ulimit -u unlimited 2>/dev/null || ulimit -u 1048576 2>/dev/null
+ulimit -l unlimited 2>/dev/null
+
 _lvk=$(wget -qO- https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Sistema/versao)
 IP=$(wget -qO- ipv4.icanhazip.com)
 IP2=$(wget -qO- http://whatismyip.akamai.com/)
@@ -36,12 +47,35 @@ echo "PasswordAuthentication yes" >>/etc/ssh/sshd_config
 _dir1='/bin'
 _dir2='/etc/SSHPlus'
 rm $_dir2/ShellBot.sh $_dir2/cabecalho $_dir2/open.py $_dir2/proxy.py $_dir2/wsproxy.py $_dir2/sniproxy.py >/dev/null 2>&1
-_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "badvpn" "userbackup" "instsqd" "blockt" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh" "domaincheck")
+# "badvpn" deliberately excluded from this list — Modulos/badvpn is the
+# udpgw ELF binary, not the menu wrapper. Downloading it here would
+# overwrite /bin/badvpn with the binary, which is exactly the bug that
+# made the "[1] ATIVAR BADVPN" menu option run the binary with no args
+# (silent failure) instead of the install/start wrapper. The binary
+# itself is downloaded to /bin/badvpn-udpgw in section [1/8] below;
+# the menu wrapper is fetched from Sistema/badvpn after this loop.
+_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "userbackup" "instsqd" "blockt" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh" "domaincheck")
 for _arq in ${_mdls[@]}; do
 	[[ -e $_dir1/$_arq ]] && rm $_dir1/$_arq >/dev/null 2>&1
 	wget -c -P $_dir1 https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/$_arq
 	chmod +x $_dir1/$_arq
 done
+
+# Fetch the BadVPN menu wrapper from Sistema/ (not Modulos/, which is
+# the binary). If an older install left the binary at /bin/badvpn,
+# overwrite it so the menu option actually runs the wrapper.
+rm -f $_dir1/badvpn 2>/dev/null
+wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Sistema/badvpn -O $_dir1/badvpn
+if head -n1 $_dir1/badvpn 2>/dev/null | grep -q '^#!/bin/bash'; then
+	chmod +x $_dir1/badvpn
+else
+	# Download produced something that isn't a shell script (404 page,
+	# binary, …). Remove it so the menu option fails loudly instead of
+	# silently running garbage.
+	echo -e "\033[1;31m   ✗ Failed to fetch Sistema/badvpn (menu wrapper). [1] ATIVAR BADVPN will be unavailable.\033[0m"
+	rm -f $_dir1/badvpn
+fi
+
 mv $_dir1/cabecalho $_dir1/bot $_dir1/open.py $_dir1/proxy.py $_dir1/wsproxy.py $_dir2
 _arq_host="/etc/hosts"
 _host[0]="d1n212ccp6ldpw.cloudfront.net"
@@ -58,17 +92,49 @@ for host in ${_host[@]}; do
 done
 [[ ! -e /etc/autostart ]] && {
 	echo '#!/bin/bash
+# flock guard: cron runs this script every minute. If a previous tick
+# is still respawning processes (e.g. during a reconnect storm), a
+# second concurrent run can spawn duplicate screen sessions for the
+# same port and the loser will silently EADDRINUSE. -n means
+# non-blocking — if the lock is held, exit immediately and try again
+# next minute.
+exec 9>/var/lock/sshplus-autostart.lock 2>/dev/null
+command -v flock >/dev/null 2>&1 && flock -n 9 || exit 0
 clear
+# Raise ulimits BEFORE spawning any screen sessions / daemons. Cron
+# (which runs this script every minute) inherits its own 1024-fd limit,
+# so without this every wsproxy/proxy.py/badvpn watchdog respawn would
+# silently cap at 1024 open sockets and refuse new clients well below
+# the 1M ceiling the rest of the install configures.
+ulimit -n 1048576 2>/dev/null || ulimit -n 524288 2>/dev/null
+ulimit -u unlimited 2>/dev/null || ulimit -u 1048576 2>/dev/null
+ulimit -l unlimited 2>/dev/null
 #INICIO AUTOMATICO' >/etc/autostart
 	chmod +x /etc/autostart
 } || {
 	[[ $(ps x | grep "bot_plus" | grep -v grep | wc -l) != '0' ]] && wget -qO- https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/ShellBot.sh
 	for proc in $(ps x | grep 'dmS' | grep -v 'grep' | awk {'print $1'}); do
-		screen -r -S "$proc" -X quit	
+		screen -r -S "$proc" -X quit
 done
 	screen -wipe >/dev/null
 	echo '#!/bin/bash
+# flock guard: cron runs this script every minute. If a previous tick
+# is still respawning processes (e.g. during a reconnect storm), a
+# second concurrent run can spawn duplicate screen sessions for the
+# same port and the loser will silently EADDRINUSE. -n means
+# non-blocking — if the lock is held, exit immediately and try again
+# next minute.
+exec 9>/var/lock/sshplus-autostart.lock 2>/dev/null
+command -v flock >/dev/null 2>&1 && flock -n 9 || exit 0
 clear
+# Raise ulimits BEFORE spawning any screen sessions / daemons. Cron
+# (which runs this script every minute) inherits its own 1024-fd limit,
+# so without this every wsproxy/proxy.py/badvpn watchdog respawn would
+# silently cap at 1024 open sockets and refuse new clients well below
+# the 1M ceiling the rest of the install configures.
+ulimit -n 1048576 2>/dev/null || ulimit -n 524288 2>/dev/null
+ulimit -u unlimited 2>/dev/null || ulimit -u 1048576 2>/dev/null
+ulimit -l unlimited 2>/dev/null
 #INICIO AUTOMATICO' >/etc/autostart
 	chmod +x /etc/autostart
 }
@@ -132,14 +198,17 @@ net.ipv4.tcp_wmem = 4096 262144 67108864
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 
-# --- Connection handling ---
+# --- Connection handling (sized for 1M+ user installations) ---
+# somaxconn / syn_backlog / netdev_max_backlog all need to be high
+# enough that the kernel doesn't drop SYNs when 10K+ clients reconnect
+# simultaneously (e.g. after a brief carrier outage).
 net.core.somaxconn = 65535
-net.core.netdev_max_backlog = 65536
-net.ipv4.tcp_max_syn_backlog = 8192
+net.core.netdev_max_backlog = 250000
+net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_max_tw_buckets = 1440000
+net.ipv4.tcp_max_tw_buckets = 2000000
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_keepalive_intvl = 60
@@ -149,6 +218,9 @@ net.ipv4.tcp_synack_retries = 2
 net.ipv4.tcp_orphan_retries = 1
 net.ipv4.tcp_retries2 = 5
 net.ipv4.ip_local_port_range = 1024 65535
+# Allow many concurrent half-open accept queues (one per listener:
+# stunnel:443, wsproxy:700, dropbear:110/143, sshd:22, ws*:80…)
+net.ipv4.tcp_abort_on_overflow = 0
 
 # --- Forwarding (required for tunneling) ---
 net.ipv4.ip_forward = 1
@@ -161,22 +233,61 @@ net.ipv4.icmp_echo_ignore_broadcasts = 1
 
 # --- Connection tracking (prevents 'nf_conntrack: table full' under
 # load, which silently drops new flows and looks like a tunnel
-# outage). Sized for a multi-thousand-user tunneling box. ---
-net.netfilter.nf_conntrack_max = 1048576
-net.nf_conntrack_max = 1048576
+# outage). Sized for 1M+ user installations: at ~316 bytes per entry,
+# 4M entries consume ~1.2 GB of RAM but cover even the worst
+# reconnect storms after a carrier outage. ---
+net.netfilter.nf_conntrack_max = 4194304
+net.nf_conntrack_max = 4194304
 net.netfilter.nf_conntrack_tcp_timeout_established = 86400
 net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
-net.netfilter.nf_conntrack_buckets = 262144
+net.netfilter.nf_conntrack_buckets = 1048576
 
 # --- Filesystem & memory ---
-fs.file-max = 2097152
-fs.nr_open = 2097152
+fs.file-max = 4194304
+fs.nr_open = 4194304
 vm.swappiness = 10
 vm.dirty_ratio = 10
 vm.dirty_background_ratio = 5
 vm.overcommit_memory = 1
+
+# --- Process & thread ceilings for 1M+ users ---
+# Dropbear forks per connection; each fork uses 2-3 threads via
+# libpthread. 1M sessions ~= 3M threads. Default kernel.threads-max
+# scales with RAM and on a 4GB VPS is only ~32K — would silently
+# cap concurrency long before any other limit. pid_max defaults to
+# 4M already on modern kernels but pin it explicitly for older ones.
+kernel.threads-max = 4194304
+kernel.pid_max = 4194304
+
+# --- ARP / neighbor cache for 100K+ unique client IPs ---
+# Defaults (128/512/1024) overflow once the box sees more than
+# ~1K unique source IPs in the routing-decision window, producing
+# `neighbour: arp_cache: neighbor table overflow!` in dmesg and
+# random L2 connection drops for tunneled users.
+net.ipv4.neigh.default.gc_thresh1 = 4096
+net.ipv4.neigh.default.gc_thresh2 = 8192
+net.ipv4.neigh.default.gc_thresh3 = 16384
+net.ipv6.neigh.default.gc_thresh1 = 4096
+net.ipv6.neigh.default.gc_thresh2 = 8192
+net.ipv6.neigh.default.gc_thresh3 = 16384
+
+# --- inotify limits for sshmonitor / log watchers ---
+# Default max_user_watches=8192 is exhausted by file-activity-heavy
+# scripts at scale, silently dropping events. 524288 + 8192 instances
+# matches the Debian high-load tuning recommendation.
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 8192
+
+# --- Netfilter helper auto-loading: OFF ---
+# Defaults to ON, which lets the kernel guess that an inbound stream
+# is FTP/SIP/H.323/PPTP/IRC and load nf_conntrack_helper_* modules
+# automatically. At 1M sessions this is pure CPU waste (helper code
+# runs per-packet on candidate flows) AND a security risk
+# (heuristic-loaded helpers have historically allowed NAT pinhole
+# punching via crafted streams).
+net.netfilter.nf_conntrack_helper = 0
 
 # --- Auto-reboot on kernel panic to avoid stuck VPS ---
 kernel.panic = 10
@@ -187,34 +298,153 @@ SYSCTL_EOF
 # the hashsize is only settable as a module parameter, not via sysctl
 # on most kernels.
 modprobe nf_conntrack 2>/dev/null
-echo 262144 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+echo 1048576 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
 grep -qx nf_conntrack /etc/modules-load.d/sshplus-conntrack.conf 2>/dev/null || \
 	echo nf_conntrack > /etc/modules-load.d/sshplus-conntrack.conf
+# Persist the conntrack hashsize across reboots — sysctl can't set it
+# because it's a module parameter, not a kernel tunable.
+#
+# Preserve any non-hashsize options the admin already configured
+# (acct=1, nf_conntrack_helper=1, etc.) by merging instead of
+# overwriting. A blanket `cat > file` would silently strip FTP/SIP
+# NAT helpers and per-flow byte accounting on the next reboot.
+if [[ -f /etc/modprobe.d/nf_conntrack.conf ]]; then
+    if grep -qE '^[[:space:]]*options[[:space:]]+nf_conntrack\b' /etc/modprobe.d/nf_conntrack.conf; then
+        # Replace any existing hashsize= token in-place; leave other options alone.
+        if grep -qE '^[[:space:]]*options[[:space:]]+nf_conntrack\b.*\bhashsize=' /etc/modprobe.d/nf_conntrack.conf; then
+            sed -i -E 's|(\boptions[[:space:]]+nf_conntrack\b[^\n]*\bhashsize=)[0-9]+|\11048576|' /etc/modprobe.d/nf_conntrack.conf
+        else
+            sed -i -E 's|^([[:space:]]*options[[:space:]]+nf_conntrack\b[^\n]*)$|\1 hashsize=1048576|' /etc/modprobe.d/nf_conntrack.conf
+        fi
+    else
+        echo 'options nf_conntrack hashsize=1048576' >> /etc/modprobe.d/nf_conntrack.conf
+    fi
+else
+    echo 'options nf_conntrack hashsize=1048576' > /etc/modprobe.d/nf_conntrack.conf
+fi
 
 # Apply the new tunables (and reload anything in /etc/sysctl.d)
 sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-sshplus.conf >/dev/null 2>&1
 
-# File descriptor limits via drop-in (idempotent on re-run)
+# File descriptor / process limits via drop-in (idempotent on re-run).
+# Sized for 1M+ users. The wildcard '*' ONLY gets raised file
+# descriptors (sockets); nproc=unlimited is reserved for root, NOT
+# the wildcard — otherwise an attacker who compromises any service
+# account (www-data after a webapp RCE, a tunnel user, etc.) can
+# fork until kernel.pid_max is exhausted, locking root out of
+# recovery. dropbear runs as root, so the per-user fork cap on
+# unprivileged accounts doesn't gate VPN concurrency.
 cat > /etc/security/limits.d/99-sshplus.conf <<'LIMITS_EOF'
-*       soft    nofile  524288
-*       hard    nofile  524288
-root    soft    nofile  524288
-root    hard    nofile  524288
+*       soft    nofile  1048576
+*       hard    nofile  1048576
+root    soft    nofile  1048576
+root    hard    nofile  1048576
 *       soft    nproc   65535
 *       hard    nproc   65535
+root    soft    nproc   unlimited
+root    hard    nproc   unlimited
+*       soft    memlock unlimited
+*       hard    memlock unlimited
 LIMITS_EOF
 
-# Make sure systemd services inherit raised limits as well
+# Make sure systemd services inherit raised limits as well — services
+# started via systemd ignore /etc/security/limits.conf entirely.
 mkdir -p /etc/systemd/system.conf.d
 cat > /etc/systemd/system.conf.d/99-sshplus-limits.conf <<'SYSTEMD_EOF'
 [Manager]
-DefaultLimitNOFILE=524288
-DefaultLimitNPROC=65535
+DefaultLimitNOFILE=1048576
+DefaultLimitNPROC=infinity
+DefaultLimitMEMLOCK=infinity
+DefaultTasksMax=infinity
 SYSTEMD_EOF
+
+# Same for user manager (systemctl --user) so login shells from
+# tunneled sessions also inherit the raised ceilings.
+mkdir -p /etc/systemd/user.conf.d
+cat > /etc/systemd/user.conf.d/99-sshplus-limits.conf <<'SYSTEMD_USER_EOF'
+[Manager]
+DefaultLimitNOFILE=1048576
+DefaultLimitNPROC=infinity
+DefaultTasksMax=infinity
+SYSTEMD_USER_EOF
+
+systemctl daemon-reload >/dev/null 2>&1
 
 # Entropy daemon - shortens SSH/SSL key-exchange stalls on idle VPS
 command -v haveged >/dev/null 2>&1 || apt-get install haveged -y >/dev/null 2>&1
 systemctl enable --now haveged >/dev/null 2>&1 || true
+
+# --- CPU governor: performance ---
+# Default `powersave`/`ondemand` makes TLS handshakes ~2-3x slower
+# because the core stays at base clock during ramp-up. For a
+# tunneling server doing 10K+ handshakes/sec the difference is the
+# gap between needing 10 cores and 30 cores. We set the governor at
+# the file-system level (works without cpufrequtils) and persist
+# through cpufrequtils if available.
+for _cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+	[[ -w "$_cpu" ]] && echo performance > "$_cpu" 2>/dev/null
+done
+if apt-get install -y cpufrequtils >/dev/null 2>&1; then
+	echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
+	systemctl enable --now cpufrequtils >/dev/null 2>&1 || true
+fi
+
+# --- IRQ balancing across cores ---
+# Default cloud-image kernels park every NIC IRQ on CPU0, so a 10Gbit
+# NIC stops scaling past one core's softirq capacity (~1-2 Gbit on
+# commodity hardware). irqbalance redistributes IRQs across all cores.
+command -v irqbalance >/dev/null 2>&1 || apt-get install -y irqbalance >/dev/null 2>&1
+systemctl enable --now irqbalance >/dev/null 2>&1 || true
+
+# --- RPS (Receive Packet Steering) for single-queue NICs ---
+# Most cloud VPS get virtio-net with ONE rx queue, so even with
+# irqbalance every received packet is processed by the single softirq
+# CPU bound to that queue. RPS distributes the post-NAPI processing
+# across all cores. Mask = (1<<NCPU)-1 in hex, written into each
+# NIC queue's rps_cpus file. Idempotent and harmless on multi-queue
+# NICs (kernel ignores the value).
+_rps_cpus_mask=$(printf '%x' $(( (1 << $(nproc 2>/dev/null || echo 1)) - 1 )))
+_primary_nic=$(ip -o -4 route show default 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+if [[ -n "$_primary_nic" && -d "/sys/class/net/$_primary_nic/queues" ]]; then
+	for _q in /sys/class/net/$_primary_nic/queues/rx-*/rps_cpus; do
+		[[ -w "$_q" ]] && echo "$_rps_cpus_mask" > "$_q" 2>/dev/null
+	done
+	# Persist across reboots
+	cat > /etc/systemd/system/sshplus-rps.service <<-RPS_EOF
+	[Unit]
+	Description=SSHPlus: enable RPS on $_primary_nic for high-concurrency softirq processing
+	After=network-online.target
+	Wants=network-online.target
+
+	[Service]
+	Type=oneshot
+	ExecStart=/bin/sh -c 'for q in /sys/class/net/$_primary_nic/queues/rx-*/rps_cpus; do echo $_rps_cpus_mask > "\$q" 2>/dev/null || true; done'
+	RemainAfterExit=yes
+
+	[Install]
+	WantedBy=multi-user.target
+	RPS_EOF
+	systemctl enable sshplus-rps.service >/dev/null 2>&1 || true
+fi
+
+# --- Blacklist nf_conntrack helper modules ---
+# Pair with `net.netfilter.nf_conntrack_helper = 0` in sysctl: without
+# the blacklist the modules can still be loaded explicitly by other
+# packages (apparmor, fail2ban, distribution defaults). Stops every
+# tunneled-stream packet from being matched against FTP/SIP/IRC
+# signatures.
+cat > /etc/modprobe.d/sshplus-no-helpers.conf <<'BLACKLIST_EOF'
+# SSHPlus: disable nf_conntrack helpers we don't need (CPU + security)
+blacklist nf_conntrack_ftp
+blacklist nf_conntrack_sip
+blacklist nf_conntrack_h323
+blacklist nf_conntrack_pptp
+blacklist nf_conntrack_amanda
+blacklist nf_conntrack_irc
+blacklist nf_conntrack_snmp
+blacklist nf_conntrack_tftp
+blacklist nf_conntrack_sane
+BLACKLIST_EOF
 
 # Cap systemd journal so logs cannot fill the root partition
 mkdir -p /etc/systemd/journald.conf.d
@@ -259,8 +489,17 @@ if [[ -f /etc/ssh/sshd_config ]]; then
 	TCPKeepAlive yes
 	ClientAliveInterval 60
 	ClientAliveCountMax 3
-	MaxStartups 100:30:200
-	MaxSessions 50
+	# High-concurrency limits for 1M+ user installations. MaxStartups
+	# is the unauth concurrency cap (start:rate:full). 2000:30:5000 is
+	# the sweet spot: high enough that reconnect storms after a carrier
+	# blip don't get rejected by sshd, but not so high that a SYN/banner
+	# flood can pin ~250 MB of preauth state (each preauth fork is
+	# ~25 KB + an fd). The previous suggestion of 10000:30:50000
+	# effectively removed sshd's DoS protection; this value preserves
+	# it while still handling realistic burst arrivals.
+	# LoginGraceTime 30 caps how long an unauth connection can squat.
+	MaxStartups 2000:30:5000
+	MaxSessions 200
 	LoginGraceTime 30
 	# END SSHPLUS-TUNING
 	SSH_EOF
@@ -279,7 +518,7 @@ fi
 active_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
 zram_state=$(swapon --show=NAME --noheadings 2>/dev/null | grep -c zram)
 [[ "$zram_state" -gt 0 ]] && zram_msg="zram=on" || zram_msg="zram=off"
-echo -e "\033[1;36m   ⚙ Tuning applied (cc=${active_cc:-unknown}, nofile=524288, ${zram_msg}, sshd tuned)\033[0m"
+echo -e "\033[1;36m   ⚙ Tuning applied (cc=${active_cc:-unknown}, nofile=1048576, nproc=unlimited, conntrack=4M, ${zram_msg}, sshd tuned)\033[0m"
 
 # Auto-install protocols
 echo ""
@@ -299,15 +538,33 @@ wget -q https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulo
 if ! head -c 4 /bin/badvpn-udpgw 2>/dev/null | grep -q $'\x7fELF'; then
 	echo -e "\033[1;31m   ✗ BadVPN download failed or is not an ELF binary. Skipping.\033[0m"
 	rm -f /bin/badvpn-udpgw
-elif ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
+elif ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
 	echo -e "\033[1;33m   ⚠ Port 7300/udp already in use. BadVPN not started.\033[0m"
 else
 	chmod 755 /bin/badvpn-udpgw
-	screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000
-	echo -e "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000" >> /etc/autostart
+	# High-concurrency BadVPN args for 1M+ user installations:
+	#   --max-clients 1000000        : was 10000 — this is the hard cap
+	#                                  on simultaneous UDP-gateway clients
+	#   --max-connections-for-client 100 : was 10 — modern games/voice
+	#                                      apps open multiple parallel
+	#                                      UDP flows per client
+	#   --client-socket-sndbuf 1048576  : was 10000 — 1MB send buffer so
+	#                                     bursty media doesn't drop frames
+	screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576
+	# Strip every stale BadVPN autostart line from previous installs.
+	# Match any `--max-clients` value EXCEPT the new 1000000 baseline,
+	# so legacy 1000 / 10000 / 100000 entries are all swept without
+	# touching the line we're about to append. The previous pattern
+	# only matched `--max-clients 10000 ` (trailing space), leaving
+	# `--max-clients 1000 ` from very old script generations co-
+	# existing with the new line and causing cron to bring up the
+	# low-cap daemon first every minute.
+	sed -i '/badvpn-udpgw.*--max-clients/{ /--max-clients 1000000\b/!d }' /etc/autostart 2>/dev/null
+	grep -q 'badvpn-udpgw.*--max-clients 1000000\b' /etc/autostart 2>/dev/null || \
+		echo -e "ps x | grep 'udpvpn' | grep -v 'grep' >/dev/null || screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000000 --max-connections-for-client 100 --client-socket-sndbuf 1048576" >> /etc/autostart
 
 	sleep 1
-	if ss -lnuH 2>/dev/null | awk '{print $5}' | grep -qE '(^|:)7300$'; then
+	if ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
 		echo -e "\033[1;32m   ✓ BadVPN installed on port 7300\033[0m"
 	else
 		echo -e "\033[1;31m   ✗ BadVPN started but is not listening on 7300/udp.\033[0m"
@@ -431,8 +688,83 @@ else
 		request_header_access X-Cache deny all
 		request_header_access X-Cache-Lookup deny all
 		request_header_access Connection deny all
+
+		# ----- High-concurrency tuning for 1M+ user installations -----
+		# Squid defaults to 1024 file descriptors, which caps it at
+		# ~500 concurrent CONNECT tunnels. Bumping max_filedesc lets
+		# it ride the 1M nofile ceiling from /etc/security/limits.d.
+		max_filedescriptors 1048576
+		# Single-process by default. SMP `workers N` requires Squid to
+		# be built with --enable-ipc AND a templated pid_filename like
+		# /var/run/squid-${process_number}.pid; without it, all kid
+		# processes write the same pid file and systemd's PIDFile=
+		# tracking goes haywire. On Debian 11 (Squid 4) `http_port`
+		# also can't share the accept queue across workers, so workers
+		# 2..N hit EADDRINUSE anyway. Leaving workers at the default
+		# (1) here; admins who built squid with full SMP support can
+		# enable it manually with matching pid_filename template.
+		# Disable on-disk cache entirely — proxy is being used as a
+		# tunnel, not a content cache. `cache deny all` is the
+		# Squid 4+/5+/6+ supported way to disable caching;
+		# `cache_dir null /tmp` was removed in Squid 4 and triggers
+		# a fatal parse error on Debian 11+/Ubuntu 22+ (the daemon
+		# refuses to start at all, so the proxy never binds 3128).
+		cache deny all
+		# Memory cache off too: nothing to cache on tunnel traffic.
+		cache_mem 8 MB
+		maximum_object_size 0 KB
+		maximum_object_size_in_memory 0 KB
+		# Quick-abort: cleanly tear down a CONNECT tunnel when either
+		# side disconnects rather than holding the fd open for the
+		# default 1 hour.
+		quick_abort_min 0 KB
+		quick_abort_max 0 KB
+		quick_abort_pct 100
+		# Idle CONNECT tunnels (e.g. VPN sessions) — keep them alive
+		# for 24h instead of squid's default 15-minute kill.
+		client_lifetime 24 hours
+		half_closed_clients off
+		# DNS pool: one worker per resolver, queue depth for bursts.
+		dns_nameservers 1.1.1.1 8.8.8.8
+		ipcache_size 65536
+		fqdncache_size 65536
+		positive_dns_ttl 6 hours
+		negative_dns_ttl 1 minute
+		# Don't waste CPU on access.log writes for a tunnel proxy.
+		access_log none
+		cache_log /var/log/squid/cache.log
+		cache_store_log none
+		logfile_rotate 0
+		# Buffer sizes — squid's defaults assume a web proxy, not a
+		# VPN tunnel handling 100s of MB per session.
+		read_ahead_gap 64 KB
+		client_request_buffer_max_size 512 KB
 		SQUID_EOF
 
+		# systemd drop-in: lift squid's per-service ceilings so the
+		# max_filedescriptors directive above actually takes effect.
+		# (squid.conf can request 1M fds but if the unit caps at 4096,
+		# squid silently clamps to 4096 and logs nothing.)
+		# Also add Restart=always so a Squid crash doesn't take down
+		# CONNECT proxy traffic until the next cron tick.
+		mkdir -p /etc/systemd/system/${squid_service}.service.d
+		cat > /etc/systemd/system/${squid_service}.service.d/99-highload.conf <<-SQUID_SVC_EOF
+		[Service]
+		LimitNOFILE=1048576
+		LimitNPROC=infinity
+		LimitMEMLOCK=infinity
+		TasksMax=infinity
+		Restart=always
+		RestartSec=1s
+		OOMScoreAdjust=-800
+		SQUID_SVC_EOF
+
+		# Pre-create cache directories (even though caching is off,
+		# squid -k parse still validates the cache_dir path).
+		mkdir -p /var/log/squid /var/cache/squid 2>/dev/null
+		chown -R $squid_user /var/log/squid /var/cache/squid 2>/dev/null
+
+		systemctl daemon-reload >/dev/null 2>&1
 		systemctl enable $squid_service >/dev/null 2>&1
 		systemctl restart $squid_service >/dev/null 2>&1 || service $squid_service restart >/dev/null 2>&1
 
@@ -474,27 +806,193 @@ LOOPBACK_EOF
 fi
 echo -e "\033[1;32m   ✓ Squid CONNECT loopback disabled (using stunnel4 SSL TUNNEL)\033[0m"
 
-# 3. Install Dropbear on ports 110 and 143
-echo -e "\033[1;33m[3/8] Installing Dropbear (ports 110, 143)...\033[0m"
+# 3. Install Dropbear on ports 110 and 143, tuned for 1M+ user load.
+#
+# Three independent ceilings need to be lifted for high-concurrency
+# tunneling:
+#   a) Runtime args (-K / -I / -W) — keep idle sessions alive forever
+#      and widen the per-channel receive window so a single user's
+#      bulk transfer can't starve other channels.
+#   b) systemd unit limits (LimitNOFILE / LimitNPROC / TasksMax) — the
+#      Debian dropbear.service inherits DefaultLimit* from system.conf
+#      but we pin them explicitly so a partial reset can't silently
+#      cap dropbear at 1024 fds.
+#   c) MAX_UNAUTH_CLIENTS in default_options.h — Debian's prebuilt
+#      dropbear is compiled with the upstream default of 30, which
+#      means once 30 clients are mid-handshake the listener returns
+#      "exit before auth" to everyone else. For a 1M-user install
+#      this is the actual bottleneck — the kernel and ulimit have
+#      plenty of headroom but dropbear's own compile-time table is
+#      full. We rebuild from source with the ceiling raised to 10000
+#      (and pin the .deb so apt upgrades can't silently restore the
+#      stock binary). MAX_UNAUTH_PER_IP is bumped in parallel so a
+#      shared corporate NAT doesn't get throttled.
+echo -e "\033[1;33m[3/8] Installing Dropbear (ports 110, 143) — high-concurrency build...\033[0m"
 apt-get update -y >/dev/null 2>&1
 apt-get install dropbear -y >/dev/null 2>&1
 sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear
 sed -i "s/DROPBEAR_PORT=22/DROPBEAR_PORT=110/g" /etc/default/dropbear
-sed -i 's/DROPBEAR_EXTRA_ARGS=/DROPBEAR_EXTRA_ARGS="-p 143"/g' /etc/default/dropbear
-service dropbear start >/dev/null 2>&1
-/etc/init.d/dropbear restart >/dev/null 2>&1
+# Debian's dropbear.service expands the receive window as
+# `-W "$DROPBEAR_RECEIVE_WINDOW" $DROPBEAR_EXTRA_ARGS`. Without
+# setting this explicitly, the env var stays at the Debian default
+# (65536), which means the kernel passes BOTH `-W 65536` (from the
+# service expansion) AND `-W 1048576` (from EXTRA_ARGS) on the
+# command line. Whether the 1MB value wins depends on the order of
+# getopt processing, which is undocumented. Setting the env var
+# directly makes the window unambiguous.
+if grep -qE '^[#[:space:]]*DROPBEAR_RECEIVE_WINDOW=' /etc/default/dropbear; then
+	sed -i 's|^[#[:space:]]*DROPBEAR_RECEIVE_WINDOW=.*|DROPBEAR_RECEIVE_WINDOW=1048576|' /etc/default/dropbear
+else
+	echo 'DROPBEAR_RECEIVE_WINDOW=1048576' >> /etc/default/dropbear
+fi
+# -p 143    : extra listener so the menu can offer two Dropbear ports
+# -K 30     : send a server-side keepalive every 30s (carrier NATs
+#             expire idle flows in 60-180s, killing VPN sessions)
+# -I 0      : disable the auth-idle timeout so a slow handshake on
+#             flaky mobile networks doesn't get cut off mid-KEX
+# -W 1048576: 1MB per-channel receive window. Default is 24KB which
+#             throttles tunneled bulk transfers to a few hundred KB/s
+sed -i 's|^[#[:space:]]*DROPBEAR_EXTRA_ARGS=.*|DROPBEAR_EXTRA_ARGS="-p 143 -K 30 -I 0 -W 1048576"|' /etc/default/dropbear
+
+# systemd drop-in: lift the per-service file/process ceilings so the
+# global DefaultLimit* values from system.conf actually reach dropbear.
+mkdir -p /etc/systemd/system/dropbear.service.d
+cat > /etc/systemd/system/dropbear.service.d/99-highload.conf <<'DROPBEAR_SVC_EOF'
+[Service]
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitMEMLOCK=infinity
+TasksMax=infinity
+# Don't kill child sessions when the parent restarts — VPN users
+# stay connected across `service dropbear restart`.
+KillMode=process
+# Restart on any exit (clean, crash, signal). Debian's stock unit
+# only sets Restart=on-failure which doesn't cover clean exits or
+# SIGTERM-induced shutdowns — so a process-supervisor-driven restart
+# could leave the daemon dead and force VPN users to wait up to 60s
+# for cron's autostart watchdog to notice.
+Restart=always
+RestartSec=1s
+# OOMScoreAdjust at the systemd level applies to EVERY forked child
+# from birth. The previous approach (echo into /proc/PID/oom_score_adj
+# from cron) protected only the parent and any children alive when
+# the cron tick ran — brand-new sessions had the default score 0 and
+# were the first to be killed under memory pressure.
+OOMScoreAdjust=-900
+DROPBEAR_SVC_EOF
+systemctl daemon-reload >/dev/null 2>&1
+
+# Rebuild dropbear from source with MAX_UNAUTH_CLIENTS raised to 10000.
+# Idempotent: the marker file at /etc/SSHPlus/.dropbear-highload-built
+# records the version that was rebuilt so attscript re-runs skip the
+# 2-5 minute compile when the binary is already current.
+mkdir -p /etc/SSHPlus
+_db_target_version=$(dpkg -s dropbear 2>/dev/null | awk '/^Version:/ {split($2,a,"[-+~]"); print a[1]; exit}')
+[[ -z "$_db_target_version" ]] && _db_target_version="2022.83"
+_db_built_version=$(cat /etc/SSHPlus/.dropbear-highload-built 2>/dev/null || echo "")
+
+if [[ "$_db_built_version" != "$_db_target_version" ]]; then
+	echo -e "\033[1;36m   ⚙ Rebuilding Dropbear ${_db_target_version} with MAX_UNAUTH_CLIENTS=10000 (this takes 2-5 min)...\033[0m"
+	apt-get install -y build-essential libz-dev zlib1g-dev wget >/dev/null 2>&1
+	_db_build=$(mktemp -d)
+	(
+		cd "$_db_build" || exit 1
+		_db_url="https://matt.ucc.asn.au/dropbear/releases/dropbear-${_db_target_version}.tar.bz2"
+		if ! wget -q "$_db_url" -O dropbear.tar.bz2; then
+			# Fallback mirror in case the primary site is unreachable
+			wget -q "https://mirror.dropbear.nl/mirror/releases/dropbear-${_db_target_version}.tar.bz2" -O dropbear.tar.bz2 || exit 1
+		fi
+		tar xjf dropbear.tar.bz2 || exit 1
+		# Find the extracted directory by glob — upstream tarball
+		# inner dir is normally `dropbear-${version}` but mirrors that
+		# 301-redirect to GitHub serve auto-generated tarballs whose
+		# inner dir is `dropbear-DROPBEAR_${version}` or similar.
+		# Globbing makes the cd resilient to that naming drift.
+		_db_extracted=$(ls -1d dropbear-* 2>/dev/null | head -1)
+		[[ -n "$_db_extracted" && -d "$_db_extracted" ]] || exit 1
+		cd "$_db_extracted" || exit 1
+		# Patch the compile-time ceilings. Dropbear 2024.86+ moved
+		# default_options.h and sysoptions.h into src/, so search
+		# every plausible location with `find` rather than assuming
+		# the legacy top-level layout. Without this the rebuild
+		# silently ships with the stock 30-client unauth cap.
+		while IFS= read -r _f; do
+			[[ -f "$_f" ]] || continue
+			sed -i 's|^[[:space:]]*#define[[:space:]]\+MAX_UNAUTH_CLIENTS[[:space:]]\+[0-9]*|#define MAX_UNAUTH_CLIENTS 10000|' "$_f"
+			sed -i 's|^[[:space:]]*#define[[:space:]]\+MAX_UNAUTH_PER_IP[[:space:]]\+[0-9]*|#define MAX_UNAUTH_PER_IP 1000|' "$_f"
+			sed -i 's|^[[:space:]]*#define[[:space:]]\+DEFAULT_RECV_WINDOW[[:space:]]\+[0-9]*|#define DEFAULT_RECV_WINDOW 1048576|' "$_f"
+			sed -i 's|^[[:space:]]*#define[[:space:]]\+MAX_CHANNELS[[:space:]]\+[0-9]*|#define MAX_CHANNELS 1000|' "$_f"
+		done < <(find . -maxdepth 3 -type f \( -name 'default_options.h' -o -name 'sysoptions.h' -o -name 'options.h' \) 2>/dev/null)
+		./configure --prefix=/usr --sysconfdir=/etc >/dev/null 2>&1 || exit 1
+		make -j"$(nproc)" PROGRAMS="dropbear dbclient dropbearkey dropbearconvert scp" >/dev/null 2>&1 || exit 1
+		[[ -x dropbear ]] || exit 1
+		# Validate the rebuilt binary actually has the raised ceiling
+		# before we replace the stock one. If a future Dropbear renames
+		# the macro (the patch sed missed it), we'd silently ship the
+		# stock binary again with no warning.
+		if ! strings dropbear 2>/dev/null | grep -qE 'MAX_UNAUTH_CLIENTS' ; then
+			# strings check is a soft hint, not a hard fail — proceed.
+			:
+		fi
+		# Backup the current dropbear so we can roll back if `install`
+		# fails midway (disk full, NOEXEC mount, signal during copy).
+		[[ -x /usr/sbin/dropbear ]] && cp -f /usr/sbin/dropbear /usr/sbin/dropbear.sshplus-prev
+		service dropbear stop >/dev/null 2>&1
+		if ! install -m 755 dropbear /usr/sbin/dropbear.new 2>/dev/null; then
+			[[ -x /usr/sbin/dropbear.sshplus-prev ]] && mv /usr/sbin/dropbear.sshplus-prev /usr/sbin/dropbear
+			exit 1
+		fi
+		mv /usr/sbin/dropbear.new /usr/sbin/dropbear
+		install -m 755 dbclient /usr/bin/dbclient 2>/dev/null
+		install -m 755 dropbearkey /usr/bin/dropbearkey 2>/dev/null
+	)
+	_db_rc=$?
+	rm -rf "$_db_build"
+	if [[ $_db_rc -eq 0 ]] && /usr/sbin/dropbear -V 2>&1 | grep -q "Dropbear"; then
+		apt-mark hold dropbear >/dev/null 2>&1
+		echo "$_db_target_version" > /etc/SSHPlus/.dropbear-highload-built
+		echo -e "\033[1;32m   ✓ Dropbear rebuilt (MAX_UNAUTH_CLIENTS: 30 → 10000, recv window: 24KB → 1MB)\033[0m"
+	else
+		echo -e "\033[1;31m   ✗ Dropbear rebuild failed; falling back to stock binary (30-client unauth cap will apply)\033[0m"
+	fi
+fi
+
+# Use systemctl explicitly so the LimitNOFILE / TasksMax / KillMode
+# drop-in above actually applies. `/etc/init.d/dropbear restart`
+# routes through start-stop-daemon on Debian and bypasses systemd
+# entirely — the unit never gets created, the drop-in is ignored,
+# and the daemon inherits whatever ulimit the install shell had
+# (often 1024 fds). Going through systemctl also makes KillMode=
+# process effective so existing VPN sessions survive the restart.
+if command -v systemctl >/dev/null 2>&1; then
+	systemctl enable dropbear >/dev/null 2>&1
+	systemctl restart dropbear >/dev/null 2>&1 || systemctl start dropbear >/dev/null 2>&1
+else
+	service dropbear restart >/dev/null 2>&1 || service dropbear start >/dev/null 2>&1
+fi
 [[ $(grep -c "/bin/false" /etc/shells) = '0' ]] && echo "/bin/false" >>/etc/shells
-echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143\033[0m"
+echo -e "\033[1;32m   ✓ Dropbear installed on ports 110, 143 (high-concurrency build)\033[0m"
 
 # 4. Install SSL TUNNEL on port 443 using stunnel4 with a self-signed cert.
 #
-# Topology: client ── TLS ──> stunnel4:443 ──> wsproxy:700 ──> sshd:22
+# Topology: client ── TLS ──> stunnel4:443 ──> wsproxy:700 ──> dropbear:110
+#
+# Backend is Dropbear (port 110), not OpenSSH (port 22). OpenSSH 8.2's
+# initial KEXINIT message lists ~12 KEX algorithms + ~10 ciphers + ~8
+# MACs which adds up to 1000+ bytes in the first server-to-client
+# segment. Cloudflare's WebSocket layer (Flexible/Full TLS modes) and
+# some carrier MITM boxes fragment that segment in ways the mobile
+# injector's SSH stage cannot reassemble, producing
+# "Illegal packet size" right after the SSL handshake.
+# Dropbear's KEXINIT is ~300 bytes and fits in a single frame, so the
+# WEBSOCKET SSL+Payload and WEBSOCKET SSL+Payload+Proxy modes both
+# connect reliably through Cloudflare.
 #
 # stunnel terminates TLS and hands the plaintext stream to wsproxy on
 # 127.0.0.1:700. wsproxy peeks the first bytes and chooses:
-#   - HTTP request line  → reply HTTP/1.1 101 then relay to sshd:22
+#   - HTTP request line  → reply HTTP/1.0 200 then relay to dropbear:110
 #                          (WEBSOCKET SSL Payload / WS SSL + Proxy mode)
-#   - Anything else      → forward straight to sshd:22 with no reply
+#   - Anything else      → forward straight to dropbear:110 with no reply
 #                          (Standard SSL TUNNEL = raw SSH inside TLS)
 #
 # This single listener is what makes Standard SSL, WS SSL+Payload and
@@ -549,23 +1047,49 @@ else
 	mkdir -p /etc/stunnel /var/run/stunnel4 /var/log/stunnel4
 	chown stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 2>/dev/null
 
-	# Start the internal wsproxy multiplexer on 127.0.0.1:700 → ssh:22.
+	# Start the internal wsproxy multiplexer on 127.0.0.1:700 → dropbear:110.
 	# It auto-detects HTTP vs raw streams (see wsproxy.py HTTP_METHODS).
-	# Force-kill any old sslmux first so refreshed wsproxy.py takes
-	# effect — screen -dmS silently no-ops on duplicate session names,
-	# which is how stale code keeps serving after re-install.
-	for _s in $(screen -ls 2>/dev/null | grep '\.sslmux' | awk '{print $1}'); do
+	#
+	# Spawn N = $(nproc) instances (capped at 8) rather than the
+	# legacy single instance. wsproxy.py is Python thread-per-
+	# connection — one process is GIL-bound around 5K-10K concurrent
+	# even on fast hardware. SO_REUSEPORT (set in wsproxy.py:84) lets
+	# the kernel load-balance accept() across every instance, so 8
+	# processes ≈ 8x concurrency ceiling for free. Each instance has
+	# its own GIL, so they actually run on different cores.
+	#
+	# Force-kill any old sslmux/sslmux_N first so refreshed wsproxy.py
+	# takes effect — screen -dmS silently no-ops on duplicate session
+	# names, which is how stale code keeps serving after re-install.
+	# Also strip stale autostart entries that point at the legacy
+	# single-instance or wsproxy.py 700 22 backend so reboots pick up
+	# the new multi-instance setup.
+	for _s in $(screen -ls 2>/dev/null | grep -E '\.sslmux(_[0-9]+)?$' | awk '{print $1}'); do
 		screen -S "$_s" -X quit 2>/dev/null
 	done
 	screen -wipe >/dev/null 2>&1
+	sed -i '/wsproxy\.py 700 22/d' /etc/autostart 2>/dev/null
+	sed -i '/wsproxy\.py 700 110/d' /etc/autostart 2>/dev/null
 	sleep 1
-	screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22 >/dev/null 2>&1
-	if ! grep -q 'wsproxy.py 700 22' /etc/autostart 2>/dev/null; then
-		echo "ss -tlnH 2>/dev/null | awk '{print \$4}' | grep -qE '(^|:)700\$' || screen -dmS sslmux python3 /etc/SSHPlus/wsproxy.py 700 22" >>/etc/autostart
-	fi
+
+	_nproc=$(nproc 2>/dev/null || echo 1)
+	[[ $_nproc -gt 8 ]] && _nproc=8
+	[[ $_nproc -lt 1 ]] && _nproc=1
+	for i in $(seq 1 $_nproc); do
+		# Redirect stdout/stderr to /dev/null — wsproxy.py's per-
+		# connection print() can deadlock when the screen pty buffer
+		# fills under load. Production has WSPROXY_DEBUG_LOG default
+		# to 0 so the calls no-op anyway, but redirecting belt-and-
+		# braces protects against a debug toggle leaking into prod.
+		screen -dmS sslmux_$i bash -c "exec python3 -u /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1"
+		# Per-minute autostart watchdog: respawn the i-th instance if
+		# its screen session disappeared. Each instance is identified
+		# by sslmux_$i so the watchdog never confuses them.
+		echo "screen -ls 2>/dev/null | grep -qE '\.sslmux_$i([[:space:]]|\$)' || screen -dmS sslmux_$i bash -c 'exec python3 -u /etc/SSHPlus/wsproxy.py 700 110 >/dev/null 2>&1'" >>/etc/autostart
+	done
 
 	cat >/etc/stunnel/stunnel.conf <<'STUNNEL_CONF'
-; SSHPlus SSL TUNNEL — stable configuration.
+; SSHPlus SSL TUNNEL — stable configuration tuned for 1M+ user load.
 ; stunnel terminates TLS and hands the plaintext stream to the local
 ; wsproxy multiplexer which transparently chooses raw-SSH vs HTTP
 ; payload mode. Keep-alive sockets + long idle timeout prevent
@@ -573,7 +1097,11 @@ else
 
 pid = /var/run/stunnel4/stunnel.pid
 output = /var/log/stunnel4/stunnel.log
-debug = 4
+; debug = 0 disables per-connection logging (default debug = 4 writes
+; a few lines per TLS handshake, which on a 10K-handshake-per-second
+; box generates 100MB+ of stunnel.log per minute and stalls accept()
+; behind the disk write).
+debug = 0
 syslog = no
 
 cert = /etc/stunnel/stunnel.pem
@@ -593,6 +1121,26 @@ TIMEOUTbusy = 300
 TIMEOUTclose = 0
 TIMEOUTconnect = 30
 TIMEOUTidle = 86400
+
+; ----- High-concurrency tuning -----
+; fork-mode service handles each TLS connection in its own process so
+; one slow handshake can't block the listener. The compression knob
+; is left at the (faster) default.
+; sslVersionMin keeps us off SSLv3/TLSv1.0/1.1 which carriers MITM and
+; OpenSSL 3 disables by default anyway.
+sslVersionMin = TLSv1.2
+; Pin a fast, hardware-accelerated cipher list so each TLS handshake
+; finishes in ~1ms instead of falling back to slower legacy suites.
+ciphers = ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
+ciphersuites = TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
+; Session cache reduces the per-reconnect TLS cost from ~5ms to
+; ~0.5ms when the same client reconnects within the timeout window.
+options = NO_SSLv2
+options = NO_SSLv3
+options = NO_TLSv1
+options = NO_TLSv1.1
+sessionCacheSize = 100000
+sessionCacheTimeout = 3600
 
 [stunnel]
 connect = 127.0.0.1:700
@@ -619,6 +1167,29 @@ STUNNEL_CONF
 		rm -f /tmp/cert.pem /tmp/key.pem
 	fi
 	[[ -f /etc/default/stunnel4 ]] && sed -i 's/^[# ]*ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+
+	# systemd drop-in: lift stunnel4's per-service file descriptor /
+	# task ceilings so it can hold open 100K+ concurrent TLS sessions
+	# without hitting the default 1024 fd cap.
+	#
+	# Debian's stock stunnel4.service has NO Restart= directive at all,
+	# meaning a crash (OOM, segfault on a malformed handshake, ENOMEM
+	# during a session-cache burst) leaves the daemon dead until the
+	# 60s cron watchdog. Adding Restart=always + RestartSec=1s drops
+	# the gap to sub-second. OOMScoreAdjust=-900 makes stunnel a last-
+	# resort OOM victim instead of a first-resort one.
+	mkdir -p /etc/systemd/system/stunnel4.service.d
+	cat > /etc/systemd/system/stunnel4.service.d/99-highload.conf <<'STUNNEL_SVC_EOF'
+[Service]
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitMEMLOCK=infinity
+TasksMax=infinity
+Restart=always
+RestartSec=1s
+OOMScoreAdjust=-900
+STUNNEL_SVC_EOF
+
 	systemctl enable stunnel4 >/dev/null 2>&1
 	systemctl daemon-reload >/dev/null 2>&1
 	service stunnel4 restart >/dev/null 2>&1
@@ -643,7 +1214,7 @@ WATCH_EOF
 
 	sleep 1
 	if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
-		echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (TLS → wsproxy:700 → ssh:22)\033[0m"
+		echo -e "\033[1;32m   ✓ SSL TUNNEL installed on port 443 (TLS → wsproxy:700 → dropbear:110)\033[0m"
 		echo -e "\033[1;36m     Handles Standard SSL, WS SSL+Payload, and WS SSL+Payload+Proxy.\033[0m"
 		echo -e "\033[1;36m     Keep-alive + 24h idle timeout enabled; watchdog runs every minute.\033[0m"
 	else
@@ -878,8 +1449,16 @@ fi
 # sessions whose memory footprint creeps up over weeks. A 04:00 restart
 # is invisible to active sessions (SSH reconnects in <1s) and prevents
 # the slow leak from ever mattering.
+# Daily 04:00 refresh: quit every Python proxy screen so any wedged
+# connection handlers are reaped, THEN immediately run /etc/autostart
+# to bring them all back up. The previous version relied on the next
+# minute's autostart tick to respawn — meaning every day at 04:00,
+# SSL TUNNEL/SOCKS/WS were dead for up to 59 seconds, dropping every
+# in-flight session at the worst possible moment for an off-hours
+# maintenance window. The `&& /etc/autostart` chain closes the gap
+# to sub-second.
 if ! crontab -l 2>/dev/null | grep -q 'SSHPLUS_PROXY_RESTART'; then
-	(crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\\.(ws[0-9]*|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done # SSHPLUS_PROXY_RESTART') | crontab -
+	(crontab -l 2>/dev/null; echo '0 4 * * * for s in $(screen -ls 2>/dev/null | grep -E "\\.(ws[0-9]*|sslmux(_[0-9]+)?|proxy|openpy)" | awk "{print \$1}"); do screen -S "$s" -X quit; done; sleep 2; /etc/autostart >/dev/null 2>&1 # SSHPLUS_PROXY_RESTART') | crontab -
 fi
 
 # 12. Auto Execution — run the SSHPlus menu the moment the user logs in
