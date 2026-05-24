@@ -5,7 +5,13 @@ import socket
 import threading
 import select
 import sys
+import os
 import time
+
+# Production toggle: set WSPROXY_DEBUG_LOG=1 in env to re-enable the
+# per-connection print() that used to deadlock under load. Mirrors
+# Modulos/open.py and Modulos/wsproxy.py.
+WSPROXY_DEBUG_LOG = os.environ.get('WSPROXY_DEBUG_LOG', '0') == '1'
 
 IP = '0.0.0.0'
 try:
@@ -54,8 +60,14 @@ class Server(threading.Thread):
             self.soc.close()
 
     def printLog(self, log):
-        with self.logLock:
-            print(log)
+        # Production no-op — see Modulos/wsproxy.py for the rationale.
+        # Set WSPROXY_DEBUG_LOG=1 in env to re-enable.
+        if WSPROXY_DEBUG_LOG:
+            with self.logLock:
+                try:
+                    print(log, flush=True)
+                except (OSError, BlockingIOError):
+                    pass
 
     def addConn(self, conn):
         try:
