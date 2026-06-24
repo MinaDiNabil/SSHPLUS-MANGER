@@ -384,12 +384,77 @@ CONNTRACK_EOF
 
   # Make sure BadVPN's screen session is alive on the next /etc/autostart tick.
   # Uses awk '{print $4}' — ss -lnuH prints the local address in $4, not $5
-  # ($5 is the peer wildcard 0.0.0.0:* which never matches). Args match
-  # Install/list section [1/8] and Sistema/badvpn — 10000 clients is
-  # the realistic ceiling that fits in <50 MB of slot tables. The
-  # earlier `1000000` made the daemon OOM at startup on most VPS.
+  # ($5 is the peer wildcard 0.0.0.0:* which never matches). Args MUST match
+  # Install/list section [1/8] and Sistema/badvpn (--max-clients 1000). The
+  # previous 10000 here was an outlier that turned the box into a far larger
+  # UDP relay than the other two launch paths, amplifying the per-user DNS
+  # fan-out that got the VPS suspended for abuse. Keep all three in lockstep.
   if [[ -x /bin/badvpn-udpgw ]] && ! ss -lnuH 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)7300$'; then
-    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000 2>/dev/null
+    screen -dmS udpvpn /bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000 --max-connections-for-client 10 --client-socket-sndbuf 10000 2>/dev/null
+  fi
+
+  # --- Anti-flood guardrails for ALREADY-INSTALLED boxes --------------
+  # Fresh installs get these from Install/list sections [9/9] (anti-flood
+  # chain) and the dnsmasq block. Existing servers pick them up HERE on
+  # "force pull latest fixes" so the OVH DNS-flood / SMTP-relay
+  # suspension cannot recur. Both halves are idempotent and the chain is
+  # wired into the per-minute /etc/autostart tick so it self-heals.
+  cat > /etc/Plus-antiflood <<'ANTIFLOOD_EOF'
+#!/bin/bash
+CHAIN=SSHPLUS_ANTIFLOOD
+_hooked() { iptables -C "$1" -j "$CHAIN" 2>/dev/null; }
+if iptables -nL "$CHAIN" >/dev/null 2>&1 && _hooked OUTPUT && _hooked FORWARD; then
+	exit 0
+fi
+if iptables -nL "$CHAIN" >/dev/null 2>&1; then
+	iptables -F "$CHAIN"
+else
+	iptables -N "$CHAIN"
+fi
+for proto in udp tcp; do
+	iptables -A "$CHAIN" -p "$proto" --dport 53 \
+		-m hashlimit --hashlimit-name "dnsflood_${proto}" \
+		--hashlimit-mode srcip --hashlimit-above 500/sec \
+		--hashlimit-burst 1000 -j DROP
+done
+for port in 25 465 587 2525; do
+	iptables -A "$CHAIN" -p tcp --dport "$port" -j DROP
+done
+iptables -A "$CHAIN" -j RETURN
+_hooked OUTPUT  || iptables -I OUTPUT  -j "$CHAIN"
+_hooked FORWARD || iptables -I FORWARD -j "$CHAIN"
+ANTIFLOOD_EOF
+  chmod +x /etc/Plus-antiflood
+  bash /etc/Plus-antiflood >/dev/null 2>&1
+  if ! grep -q "/etc/Plus-antiflood" /etc/autostart 2>/dev/null; then
+    echo "[[ -e /etc/Plus-antiflood ]] && bash /etc/Plus-antiflood >/dev/null 2>&1" >> /etc/autostart
+  fi
+
+  # Local DNS cache for boxes still pointed straight at public resolvers.
+  if ! command -v dnsmasq >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq >/dev/null 2>&1
+  fi
+  if command -v dnsmasq >/dev/null 2>&1 && [[ ! -f /etc/dnsmasq.d/sshplus.conf ]]; then
+    mkdir -p /etc/dnsmasq.d
+    cat > /etc/dnsmasq.d/sshplus.conf <<'DNSMASQ_EOF'
+listen-address=127.0.0.1
+bind-interfaces
+no-resolv
+server=1.1.1.1
+server=8.8.8.8
+server=9.9.9.9
+cache-size=10000
+min-cache-ttl=60
+dns-forward-max=150
+DNSMASQ_EOF
+    systemctl enable dnsmasq >/dev/null 2>&1
+    systemctl restart dnsmasq >/dev/null 2>&1
+    sleep 1
+    if ss -lnH 'sport = :53' 2>/dev/null | grep -q '127.0.0.1:53'; then
+      chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
+      [[ -L /etc/resolv.conf ]] && rm -f /etc/resolv.conf
+      printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+    fi
   fi
 
   [[ -x /etc/autostart ]] && /etc/autostart > /dev/null 2>&1
