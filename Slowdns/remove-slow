@@ -53,7 +53,14 @@ fun_bar 'fun_rm'
 echo ""
 fun_revdns () {
 [[ -L /etc/resolv.conf ]] && rm -f /etc/resolv.conf
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
+# Restore the local dnsmasq cache if it is running (installed by SSHPLUS).
+# Falling back to 8.8.8.8 here would undo the anti-flood DNS fix and
+# could re-trigger the OVH DNS-abuse suspension.
+if command -v dnsmasq >/dev/null 2>&1 && systemctl is-active dnsmasq >/dev/null 2>&1; then
+    printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+else
+    printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' > /etc/resolv.conf
+fi
 # Don't re-enable systemd-resolved here: if the user runs SSHPLUS the
 # install/list disabled it on purpose to free port 53 for SlowDNS or
 # our other tunnels.

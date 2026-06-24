@@ -1504,8 +1504,11 @@ ifconfig-pool-persist ipp.txt" >/etc/openvpn/server.conf
 					done
 					;;
 				2)
-					echo 'push "dhcp-option DNS 8.8.8.8"' >>/etc/openvpn/server.conf
-					echo 'push "dhcp-option DNS 8.8.4.4"' >>/etc/openvpn/server.conf
+					# Route VPN-client DNS to the local dnsmasq cache on the
+					# VPN gateway IP. This stops per-client DNS queries from
+					# fanning out as raw UDP to 8.8.8.8/8.8.4.4, which is
+					# what triggered the OVH "10Kpps DNS attack" suspension.
+					echo 'push "dhcp-option DNS 10.8.0.1"' >>/etc/openvpn/server.conf
 					;;
 				3)
 					echo 'push "dhcp-option DNS 208.67.222.222"' >>/etc/openvpn/server.conf

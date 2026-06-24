@@ -203,9 +203,9 @@ if [[ "$resposta" = '1' ]]; then
     rm versao* >/dev/null 2>&1
     wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/versao >/dev/null 2>&1
     >/dev/null 2>&1
-    wget https://iplogger.org/2lHZ43 >/dev/null 2>&1
-    >/dev/null 2>&1
-    rm 2lHZ43 >/dev/null 2>&1
+    # (removed third-party IP-logger callback to iplogger.org — it leaked
+    #  the VPS public IP to an external tracker on every install and served
+    #  no functional purpose.)
     cd /bin/ >/dev/null 2>&1
     rm v2raymanager >/dev/null 2>&1
     wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/v2raymanager >/dev/null 2>&1
@@ -335,9 +335,9 @@ elif [[ "$resposta" = '2' ]]; then
     rm versao* >/dev/null 2>&1
     wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Install/versao >/dev/null 2>&1
     >/dev/null 2>&1
-    wget https://iplogger.org/2lHZ43 >/dev/null 2>&1
-    >/dev/null 2>&1
-    rm 2lHZ43 >/dev/null 2>&1
+    # (removed third-party IP-logger callback to iplogger.org — it leaked
+    #  the VPS public IP to an external tracker on every install and served
+    #  no functional purpose.)
     cd /bin/ >/dev/null 2>&1
     rm v2raymanager >/dev/null 2>&1
     wget https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/v2raymanager >/dev/null 2>&1

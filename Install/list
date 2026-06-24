@@ -1332,43 +1332,68 @@ chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
 # file so our nameservers actually take effect.
 [[ -L /etc/resolv.conf ]] && rm -f /etc/resolv.conf
 
-# Configure DNS resolution without systemd-resolved
-cat > /etc/resolv.conf <<-DNS_EOF
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-nameserver 8.8.4.4
-DNS_EOF
+# Configure DNS resolution via a LOCAL caching resolver (dnsmasq).
+#
+# Why this matters for abuse/suspension: every DNS lookup a tunnel user
+# makes through the SSH-SOCKS path is resolved by the host using
+# /etc/resolv.conf. Pointing that straight at 8.8.8.8 / 8.8.4.4 meant
+# thousands of users' queries left the VPS as raw packets aimed at
+# Google's resolvers — which is precisely the "10Kpps to 8.8.8.8:53 /
+# 8.8.4.4:53" pattern OVH flagged as a DNS attack before rescue-locking
+# the box. A loopback cache collapses duplicate lookups and caps the
+# in-flight upstream query count, keeping outbound DNS far below any
+# provider threshold. The anti-flood iptables chain (section [9/9]) is
+# the second layer for the raw-UDP (badvpn) path that bypasses libc.
+_dns_cache_ok=0
+DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq >/dev/null 2>&1
+if command -v dnsmasq >/dev/null 2>&1; then
+	mkdir -p /etc/dnsmasq.d
+	cat > /etc/dnsmasq.d/sshplus.conf <<-'DNSMASQ_EOF'
+		# 127.0.0.1 serves the host resolver (resolv.conf).
+		# 10.8.0.1 serves OpenVPN clients that receive "dhcp-option DNS 10.8.0.1".
+		# bind-dynamic allows binding to 10.8.0.1 before tun0 comes up.
+		listen-address=127.0.0.1,10.8.0.1
+		bind-dynamic
+		# Never read /etc/resolv.conf (it points back at us -> loop).
+		no-resolv
+		# Upstreams, queried only on a cache miss.
+		server=1.1.1.1
+		server=8.8.8.8
+		server=9.9.9.9
+		# Cache hard and cap concurrent upstream queries so a burst of
+		# unique names cannot fan out into a packet storm to 8.8.8.8.
+		cache-size=10000
+		min-cache-ttl=60
+		dns-forward-max=150
+	DNSMASQ_EOF
+	systemctl enable dnsmasq >/dev/null 2>&1
+	systemctl restart dnsmasq >/dev/null 2>&1
+	sleep 1
+	ss -lnH 'sport = :53' 2>/dev/null | grep -q '127.0.0.1:53' && _dns_cache_ok=1
+fi
 
-# Install SlowDNS
-cd /tmp
-wget -q https://raw.githubusercontent.com/MinaDiNabil/update.link/refs/heads/main/slowdns-v3.1.sh -O slowdns-install.sh
-chmod +x slowdns-install.sh
+if [[ "$_dns_cache_ok" = "1" ]]; then
+	# Primary path is the local cache. The second line keeps DNS alive
+	# if dnsmasq ever dies; the anti-flood chain still rate-limits it.
+	cat > /etc/resolv.conf <<-DNS_EOF
+		nameserver 127.0.0.1
+		nameserver 1.1.1.1
+	DNS_EOF
+else
+	# dnsmasq unavailable — fall back to public resolvers. Drop 8.8.4.4
+	# so a single secondary isn't hammered, and rely on the anti-flood
+	# chain to keep the rate provider-safe.
+	cat > /etc/resolv.conf <<-DNS_EOF
+		nameserver 1.1.1.1
+		nameserver 8.8.8.8
+	DNS_EOF
+fi
 
-# Run SlowDNS installation
-bash slowdns-install.sh >/dev/null 2>&1 || {
-	echo "   SlowDNS auto-installation attempted (check manually if needed)"
-}
-
-# Ensure SlowDNS services are enabled and started
-for port in 53 5300 5353; do
-	systemctl enable slowdns@$port >/dev/null 2>&1 || true
-	systemctl start slowdns@$port >/dev/null 2>&1 || true
-done
-
-# Wait a moment for services to start
-sleep 2
-
-# Check if services are running
-slowdns_status=""
-for port in 53 5300 5353; do
-	if systemctl is-active --quiet slowdns@$port 2>/dev/null; then
-		slowdns_status="${slowdns_status}✓ Port $port: Running  "
-	fi
-done
-
-cd $HOME
-echo -e "\033[1;32m   ✓ SlowDNS installation completed\033[0m"
-[[ -n "$slowdns_status" ]] && echo -e "\033[1;36m     $slowdns_status\033[0m"
+# SlowDNS is NOT installed automatically. Installing it silently on every
+# run was the primary cause of the OVH DNS-abuse suspension: the SlowDNS
+# PREROUTING rule intercepts ALL :53 traffic, and the systemd units flood
+# the upstream resolver. Users who need SlowDNS can install it manually
+# from the panel menu (Modulos/slow_dns).
 
 # 8. Install BLOCK TORRENT (Firewall Anti-Torrent)
 echo -e "\033[1;33m[8/8] Installing BLOCK TORRENT (Firewall Anti-Torrent)...\033[0m"
@@ -1430,6 +1455,77 @@ if iptables -nL BLOCK_TORRENT >/dev/null 2>&1; then
 	echo -e "\033[1;32m   ✓ BLOCK TORRENT enabled (BLOCK_TORRENT chain → FORWARD)\033[0m"
 else
 	echo -e "\033[1;31m   ✗ BLOCK TORRENT chain creation failed.\033[0m"
+fi
+
+# 9. ANTI-FLOOD: outbound DNS rate-limit + SMTP block.
+echo -e "\033[1;33m[9/9] Installing ANTI-FLOOD (outbound DNS limit + SMTP block)...\033[0m"
+
+# This is the direct counter-measure to the abuse pattern that gets
+# tunneling VPSs suspended by OVH/Hetzner/etc.:
+#   1. DNS floods to public resolvers (8.8.8.8:53, 8.8.4.4:53). The
+#      per-user lookups that tunnel through SSH-SOCKS / badvpn / OpenVPN
+#      all egress with the VPS as source. We RATE-LIMIT (not block) so
+#      normal browsing still resolves, but a flood is clipped long
+#      before it reaches the ~10Kpps OVH alarms on.
+#   2. Outbound SMTP — spam relaying through cracked tunnel accounts is
+#      the other classic suspension trigger. A tunnel host never needs
+#      to originate mail, so :25/:465/:587/:2525 are dropped outright.
+# Hooked into OUTPUT (host-originated: SSH-SOCKS, badvpn, python proxies)
+# AND FORWARD (routed OpenVPN clients). Idempotent fast-path so it is
+# cheap to re-run from cron via /etc/autostart every minute.
+cat > /etc/Plus-antiflood <<'ANTIFLOOD_EOF'
+#!/bin/bash
+CHAIN=SSHPLUS_ANTIFLOOD
+
+_hooked() { iptables -C "$1" -j "$CHAIN" 2>/dev/null; }
+
+# Fast path: chain exists and is hooked into both points -> nothing to do.
+if iptables -nL "$CHAIN" >/dev/null 2>&1 && _hooked OUTPUT && _hooked FORWARD; then
+	exit 0
+fi
+
+# Create or flush so re-runs never stack duplicate rules.
+if iptables -nL "$CHAIN" >/dev/null 2>&1; then
+	iptables -F "$CHAIN"
+else
+	iptables -N "$CHAIN"
+fi
+
+# DNS: allow a generous burst, then DROP the excess. 500/sec is ~20x
+# under the rate OVH flags, yet far above any legitimate need once the
+# local dnsmasq cache is collapsing duplicate lookups. hashlimit keys on
+# srcip so each routed OpenVPN client (FORWARD) gets its own bucket,
+# while host-originated traffic (OUTPUT) shares one global bucket.
+for proto in udp tcp; do
+	iptables -A "$CHAIN" -p "$proto" --dport 53 \
+		-m hashlimit --hashlimit-name "dnsflood_${proto}" \
+		--hashlimit-mode srcip --hashlimit-above 500/sec \
+		--hashlimit-burst 1000 -j DROP
+done
+
+# Outbound mail: tunnel hosts never send mail; block to stop spam relays.
+for port in 25 465 587 2525; do
+	iptables -A "$CHAIN" -p tcp --dport "$port" -j DROP
+done
+
+# Everything else falls through to the normal OUTPUT/FORWARD policy.
+iptables -A "$CHAIN" -j RETURN
+
+_hooked OUTPUT  || iptables -I OUTPUT  -j "$CHAIN"
+_hooked FORWARD || iptables -I FORWARD -j "$CHAIN"
+ANTIFLOOD_EOF
+
+chmod +x /etc/Plus-antiflood
+bash /etc/Plus-antiflood >/dev/null 2>&1
+
+if ! grep -q "/etc/Plus-antiflood" /etc/autostart 2>/dev/null; then
+	echo "[[ -e /etc/Plus-antiflood ]] && bash /etc/Plus-antiflood >/dev/null 2>&1" >> /etc/autostart
+fi
+
+if iptables -nL SSHPLUS_ANTIFLOOD >/dev/null 2>&1; then
+	echo -e "\033[1;32m   ✓ ANTI-FLOOD enabled (DNS ≤500/s, SMTP blocked → OUTPUT+FORWARD)\033[0m"
+else
+	echo -e "\033[1;31m   ✗ ANTI-FLOOD chain creation failed (xt_hashlimit missing?).\033[0m"
 fi
 
 # 9. Log rotation. Stunnel/python proxies write to flat files that
