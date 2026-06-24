@@ -71,7 +71,11 @@ sudo systemctl stop systemd-resolved.service 2>/dev/null
 sudo systemctl disable systemd-resolved.service 2>/dev/null
 [[ -L /etc/resolv.conf ]] && sudo rm -f /etc/resolv.conf
 [[ -e /etc/resolv.conf && ! -e /etc/resolv.conf.bkp ]] && sudo mv /etc/resolv.conf /etc/resolv.conf.bkp
-echo "nameserver 1.1.1.1" > /etc/resolv.conf
+if command -v dnsmasq >/dev/null 2>&1 && systemctl is-active dnsmasq >/dev/null 2>&1; then
+    printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+else
+    echo "nameserver 1.1.1.1" > /etc/resolv.conf
+fi
 sleep 2
 }
 fun_bar 'fun_dnscf'

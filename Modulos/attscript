@@ -431,17 +431,18 @@ ANTIFLOOD_EOF
   fi
 
   # Local DNS cache for boxes still pointed straight at public resolvers.
+  # Always rewrite the config so existing boxes pick up the 10.8.0.1
+  # listen-address (needed for OpenVPN clients) and bind-dynamic.
   if ! command -v dnsmasq >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq >/dev/null 2>&1
   fi
-  if command -v dnsmasq >/dev/null 2>&1 && [[ ! -f /etc/dnsmasq.d/sshplus.conf ]]; then
+  if command -v dnsmasq >/dev/null 2>&1; then
     mkdir -p /etc/dnsmasq.d
     cat > /etc/dnsmasq.d/sshplus.conf <<'DNSMASQ_EOF'
-listen-address=127.0.0.1
-bind-interfaces
+listen-address=127.0.0.1,10.8.0.1
+bind-dynamic
 no-resolv
 server=1.1.1.1
-server=8.8.8.8
 server=9.9.9.9
 cache-size=10000
 min-cache-ttl=60
