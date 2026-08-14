@@ -54,7 +54,7 @@ rm $_dir2/ShellBot.sh $_dir2/cabecalho $_dir2/open.py $_dir2/proxy.py $_dir2/wsp
 # (silent failure) instead of the install/start wrapper. The binary
 # itself is downloaded to /bin/badvpn-udpgw in section [1/8] below;
 # the menu wrapper is fetched from Sistema/badvpn after this loop.
-_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "userbackup" "instsqd" "blockt" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh" "domaincheck")
+_mdls=("addhost" "delhost" "alterarsenha" "criarusuario" "expcleaner" "mudardata" "remover" "criarteste" "verifbot" "droplimiter" "alterarlimite" "ajuda" "sshmonitor" "userbackup" "instsqd" "blockt" "antiflood" "otimizar" "menu" "speedtest" "banner" "senharoot" "reiniciarservicos" "reiniciarsistema" "attscript" "conexao" "delscript" "detalhes" "botssh" "infousers" "verifatt" "limiter" "uexpired" "cabecalho" "bot" "open.py" "proxy.py" "wsproxy.py" "trojan-go" "onlineapp" "swapmemory" "initbot" "initcheck" "pkill.sh" "domaincheck")
 for _arq in ${_mdls[@]}; do
 	[[ -e $_dir1/$_arq ]] && rm $_dir1/$_arq >/dev/null 2>&1
 	wget -c -P $_dir1 https://raw.githubusercontent.com/MinaDiNabil/SSHPLUS-MANGER/main/Modulos/$_arq
@@ -1457,8 +1457,8 @@ else
 	echo -e "\033[1;31m   ✗ BLOCK TORRENT chain creation failed.\033[0m"
 fi
 
-# 9. ANTI-FLOOD: outbound DNS rate-limit + SMTP block.
-echo -e "\033[1;33m[9/9] Installing ANTI-FLOOD (outbound DNS limit + SMTP block)...\033[0m"
+# 9. ANTI-FLOOD: outbound DNS rate-limit + SMTP block + SYN/UDP/ICMP flood caps.
+echo -e "\033[1;33m[9/9] Installing ANTI-FLOOD (DNS limit + SMTP block + SYN/UDP/ICMP flood caps)...\033[0m"
 
 # This is the direct counter-measure to the abuse pattern that gets
 # tunneling VPSs suspended by OVH/Hetzner/etc.:
@@ -1470,6 +1470,12 @@ echo -e "\033[1;33m[9/9] Installing ANTI-FLOOD (outbound DNS limit + SMTP block)
 #   2. Outbound SMTP — spam relaying through cracked tunnel accounts is
 #      the other classic suspension trigger. A tunnel host never needs
 #      to originate mail, so :25/:465/:587/:2525 are dropped outright.
+#   3. TCP SYN floods — the current trigger: 20Kpps of SYNs fired through
+#      a tunnel at a victim (game servers on :25565, web on :443). We
+#      rate-limit new-connection attempts per victim and per source so a
+#      DDoS is clipped long before OVH's alarm, without blocking any port.
+#   4. UDP / ICMP floods — badvpn's UDP gateway and raw ping are the
+#      adjacent cannons; both get generous per-target caps.
 # Hooked into OUTPUT (host-originated: SSH-SOCKS, badvpn, python proxies)
 # AND FORWARD (routed OpenVPN clients). Idempotent fast-path so it is
 # cheap to re-run from cron via /etc/autostart every minute.
@@ -1479,8 +1485,12 @@ CHAIN=SSHPLUS_ANTIFLOOD
 
 _hooked() { iptables -C "$1" -j "$CHAIN" 2>/dev/null; }
 
-# Fast path: chain exists and is hooked into both points -> nothing to do.
-if iptables -nL "$CHAIN" >/dev/null 2>&1 && _hooked OUTPUT && _hooked FORWARD; then
+# Fast path: chain exists, is hooked into both points, AND already carries
+# the SYN-flood rules (the synflood_new sentinel). Older builds installed a
+# DNS+SMTP-only chain; when one of those is found we fall through and rebuild
+# so the TCP-SYN / UDP / ICMP guards below are added on upgrade.
+if iptables -nL "$CHAIN" >/dev/null 2>&1 && _hooked OUTPUT && _hooked FORWARD \
+	&& iptables -S "$CHAIN" 2>/dev/null | grep -q 'synflood_new'; then
 	exit 0
 fi
 
@@ -1508,6 +1518,43 @@ for port in 25 465 587 2525; do
 	iptables -A "$CHAIN" -p tcp --dport "$port" -j DROP
 done
 
+# TCP SYN flood — the exact pattern that rescue-locked the box (20Kpps of
+# SYNs to a game server on :25565 plus assorted :443). Rate-limit only --syn
+# (new-connection attempts); established traffic is never touched, and a
+# dropped SYN is just retransmitted, so legit connections slow rather than
+# break. Two buckets:
+#   * srcip,dstip,dstport — a DDoS piles thousands of SYNs on ONE victim
+#     service; no real client opens >200 new conns/sec to a single dst, so
+#     this clips the attack to a trickle with near-zero false positives.
+#   * srcip — backstop for a flood sprayed across many victims. 500/sec is
+#     far above ordinary browsing (which fans out across destinations) yet
+#     ~40x under the rate OVH alarms on.
+# synflood_new also doubles as the upgrade sentinel checked in the fast-path.
+iptables -A "$CHAIN" -p tcp --syn \
+	-m hashlimit --hashlimit-name synflood_new \
+	--hashlimit-mode srcip,dstip,dstport --hashlimit-above 200/sec \
+	--hashlimit-burst 400 -j DROP
+iptables -A "$CHAIN" -p tcp --syn \
+	-m hashlimit --hashlimit-name synflood_src \
+	--hashlimit-mode srcip --hashlimit-above 500/sec \
+	--hashlimit-burst 1000 -j DROP
+
+# UDP flood — badvpn-udpgw is a UDP gateway, i.e. a DDoS cannon if left
+# unbounded. Key on the destination service so each real game/VoIP peer keeps
+# its own generous bucket (those run at tens of pps); only an egregious
+# per-target flood is clipped. :53 keeps its dedicated DNS limit above.
+iptables -A "$CHAIN" -p udp -m udp ! --dport 53 \
+	-m hashlimit --hashlimit-name udpflood_dst \
+	--hashlimit-mode srcip,dstip,dstport --hashlimit-above 300/sec \
+	--hashlimit-burst 600 -j DROP
+
+# ICMP echo flood — classic ping flood; 10/sec per source is ample for real
+# diagnostics (ping/mtr) and lethal to a flood.
+iptables -A "$CHAIN" -p icmp --icmp-type echo-request \
+	-m hashlimit --hashlimit-name icmpflood \
+	--hashlimit-mode srcip --hashlimit-above 10/sec \
+	--hashlimit-burst 30 -j DROP
+
 # Everything else falls through to the normal OUTPUT/FORWARD policy.
 iptables -A "$CHAIN" -j RETURN
 
@@ -1523,10 +1570,88 @@ if ! grep -q "/etc/Plus-antiflood" /etc/autostart 2>/dev/null; then
 fi
 
 if iptables -nL SSHPLUS_ANTIFLOOD >/dev/null 2>&1; then
-	echo -e "\033[1;32m   ✓ ANTI-FLOOD enabled (DNS ≤500/s, SMTP blocked → OUTPUT+FORWARD)\033[0m"
+	echo -e "\033[1;32m   ✓ ANTI-FLOOD enabled (DNS ≤500/s, SMTP blocked, SYN/UDP/ICMP flood-capped → OUTPUT+FORWARD)\033[0m"
 else
 	echo -e "\033[1;31m   ✗ ANTI-FLOOD chain creation failed (xt_hashlimit missing?).\033[0m"
 fi
+
+# Egress flood MONITOR. The chain above DROPS a flood so the box stays under
+# OVH's alarm; this watchdog answers "who?" — it attributes an in-progress
+# flood to the offending tunnel account, logs it to /var/log/sshplus-flood.log
+# so the operator can remove the abuser, and (opt-in via floodmon.conf) kills
+# the individual abusing session. Never touches master daemons or shared
+# services. Runs from the per-minute /etc/autostart tick like the chain.
+cat > /etc/Plus-floodmon <<'FLOODMON_EOF'
+#!/bin/bash
+CHAIN=SSHPLUS_ANTIFLOOD
+LOG=/var/log/sshplus-flood.log
+STATE=/etc/SSHPlus/.floodmon.state
+CONF=/etc/SSHPlus/floodmon.conf
+SYN_SOCK_MIN=500
+DROP_DELTA_MIN=2000
+STRIKES_TO_ACT=2
+ACTION=log
+[[ -r $CONF ]] && . "$CONF" 2>/dev/null
+mkdir -p /etc/SSHPlus 2>/dev/null
+ts() { date '+%F %T %Z' 2>/dev/null; }
+now_drops=0
+if iptables -nvxL "$CHAIN" >/dev/null 2>&1; then
+	now_drops=$(iptables -nvxL "$CHAIN" 2>/dev/null \
+		| awk '/synflood_new|synflood_src|udpflood_dst|icmpflood/ {s+=$1} END{print s+0}')
+fi
+prev_drops=$(sed -n 's/^drops=//p' "$STATE" 2>/dev/null); prev_drops=${prev_drops:-0}
+if [ "$now_drops" -ge "$prev_drops" ] 2>/dev/null; then
+	delta=$(( now_drops - prev_drops ))
+else
+	delta=$now_drops
+fi
+top_line=$(ss -Htanp state syn-sent 2>/dev/null \
+	| grep -oE 'pid=[0-9]+' | sort | uniq -c | sort -rn | head -1)
+top_cnt=$(echo "$top_line" | awk '{print $1+0}')
+top_pid=$(echo "$top_line" | grep -oE '[0-9]+$')
+syn_total=$(ss -Htan state syn-sent 2>/dev/null | wc -l)
+top_dst=$(ss -Htan state syn-sent 2>/dev/null | awk '{print $NF}' \
+	| sort | uniq -c | sort -rn | head -1 | awk 'NF{print $1" x "$2}')
+[ -z "$top_dst" ] && top_dst="-"
+flood=0
+[ "${top_cnt:-0}"   -ge "$SYN_SOCK_MIN"   ] 2>/dev/null && flood=1
+[ "${syn_total:-0}" -ge "$SYN_SOCK_MIN"   ] 2>/dev/null && flood=1
+[ "${delta:-0}"     -ge "$DROP_DELTA_MIN" ] 2>/dev/null && flood=1
+strikes=$(sed -n 's/^strikes=//p' "$STATE" 2>/dev/null); strikes=${strikes:-0}
+if [ "$flood" -eq 1 ]; then strikes=$(( strikes + 1 )); else strikes=0; fi
+{ echo "drops=$now_drops"; echo "strikes=$strikes"; } > "$STATE" 2>/dev/null
+[ "$flood" -eq 0 ] && exit 0
+user="?"; comm="?"
+if [ -n "$top_pid" ] && [ -r "/proc/$top_pid/status" ]; then
+	comm=$(sed -n 's/^Name:[[:space:]]*//p' "/proc/$top_pid/status" 2>/dev/null)
+	uid=$(sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$top_pid/status" 2>/dev/null)
+	user=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1); user=${user:-uid:$uid}
+fi
+printf '%s FLOOD strikes=%s half_open=%s fw_drops_delta=%s victim="%s" offender="pid=%s comm=%s user=%s socks=%s"\n' \
+	"$(ts)" "$strikes" "$syn_total" "$delta" "$top_dst" "${top_pid:--}" "$comm" "$user" "${top_cnt:-0}" \
+	>> "$LOG" 2>/dev/null
+if [ "$ACTION" = kill ] && [ "$strikes" -ge "$STRIKES_TO_ACT" ] \
+	&& [ -n "$top_pid" ] && [ "$top_pid" -gt 1 ] 2>/dev/null; then
+	if { [ "$comm" = sshd ] || [ "$comm" = dropbear ]; } \
+		&& [ -n "$user" ] && [ "$user" != root ] && [ "$user" != "uid:0" ]; then
+		if kill -9 "$top_pid" 2>/dev/null; then
+			printf '%s ACTION killed tunnel session pid=%s user=%s socks=%s\n' \
+				"$(ts)" "$top_pid" "$user" "${top_cnt:-0}" >> "$LOG" 2>/dev/null
+		fi
+	else
+		printf '%s ACTION log-only: offender pid=%s comm=%s user=%s is shared/root; not killed\n' \
+			"$(ts)" "$top_pid" "$comm" "$user" >> "$LOG" 2>/dev/null
+	fi
+fi
+exit 0
+FLOODMON_EOF
+chmod +x /etc/Plus-floodmon
+[[ -e /etc/SSHPlus/floodmon.conf ]] || printf '# ACTION=log (default) or ACTION=kill to drop the abusing session.\nACTION=log\n' > /etc/SSHPlus/floodmon.conf
+bash /etc/Plus-floodmon >/dev/null 2>&1
+if ! grep -q "/etc/Plus-floodmon" /etc/autostart 2>/dev/null; then
+	echo "[[ -e /etc/Plus-floodmon ]] && bash /etc/Plus-floodmon >/dev/null 2>&1" >> /etc/autostart
+fi
+echo -e "\033[1;32m   ✓ FLOOD MONITOR enabled (attributes + logs egress floods → /var/log/sshplus-flood.log)\033[0m"
 
 # 9. Log rotation. Stunnel/python proxies write to flat files that
 # would otherwise grow unbounded and fill /var, which silently kills
@@ -1547,6 +1672,16 @@ cat >/etc/logrotate.d/sshplus <<'LOGROTATE_EOF'
 	daily
 	rotate 7
 	maxsize 20M
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+}
+/var/log/sshplus-flood.log {
+	weekly
+	rotate 8
+	maxsize 10M
 	compress
 	delaycompress
 	missingok

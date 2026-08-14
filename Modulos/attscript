@@ -100,7 +100,7 @@ fun_force_update () {
   local _mdls=(addhost delhost alterarsenha criarusuario expcleaner \
                mudardata remover criarteste verifbot droplimiter \
                alterarlimite ajuda sshmonitor userbackup \
-               instsqd blockt otimizar menu speedtest banner \
+               instsqd blockt antiflood otimizar menu speedtest banner \
                senharoot reiniciarservicos reiniciarsistema attscript \
                conexao delscript detalhes botssh infousers verifatt \
                limiter uexpired trojan-go onlineapp swapmemory \
@@ -396,14 +396,19 @@ CONNTRACK_EOF
   # --- Anti-flood guardrails for ALREADY-INSTALLED boxes --------------
   # Fresh installs get these from Install/list sections [9/9] (anti-flood
   # chain) and the dnsmasq block. Existing servers pick them up HERE on
-  # "force pull latest fixes" so the OVH DNS-flood / SMTP-relay
-  # suspension cannot recur. Both halves are idempotent and the chain is
-  # wired into the per-minute /etc/autostart tick so it self-heals.
+  # "force pull latest fixes" so the OVH DNS-flood / SMTP-relay / TCP-SYN
+  # (20Kpps-to-:25565) suspensions cannot recur. The rebuilt chain adds
+  # SYN/UDP/ICMP flood caps to any older DNS+SMTP-only chain still live.
+  # Both halves are idempotent and the chain is wired into the per-minute
+  # /etc/autostart tick so it self-heals.
   cat > /etc/Plus-antiflood <<'ANTIFLOOD_EOF'
 #!/bin/bash
 CHAIN=SSHPLUS_ANTIFLOOD
 _hooked() { iptables -C "$1" -j "$CHAIN" 2>/dev/null; }
-if iptables -nL "$CHAIN" >/dev/null 2>&1 && _hooked OUTPUT && _hooked FORWARD; then
+# Fast path also requires the SYN-flood rules; older DNS+SMTP-only chains
+# fall through here and get rebuilt with the TCP-SYN/UDP/ICMP guards.
+if iptables -nL "$CHAIN" >/dev/null 2>&1 && _hooked OUTPUT && _hooked FORWARD \
+	&& iptables -S "$CHAIN" 2>/dev/null | grep -q 'synflood_new'; then
 	exit 0
 fi
 if iptables -nL "$CHAIN" >/dev/null 2>&1; then
@@ -420,6 +425,27 @@ done
 for port in 25 465 587 2525; do
 	iptables -A "$CHAIN" -p tcp --dport "$port" -j DROP
 done
+# TCP SYN flood (OVH 20Kpps/:25565 suspension trigger): limit new-connection
+# attempts. Per (srcip,dstip,dstport) kills a single-victim DDoS; per srcip is
+# the spread-flood backstop. synflood_new is also the upgrade sentinel above.
+iptables -A "$CHAIN" -p tcp --syn \
+	-m hashlimit --hashlimit-name synflood_new \
+	--hashlimit-mode srcip,dstip,dstport --hashlimit-above 200/sec \
+	--hashlimit-burst 400 -j DROP
+iptables -A "$CHAIN" -p tcp --syn \
+	-m hashlimit --hashlimit-name synflood_src \
+	--hashlimit-mode srcip --hashlimit-above 500/sec \
+	--hashlimit-burst 1000 -j DROP
+# UDP flood via badvpn-udpgw: generous per-target cap keeps gaming/VoIP alive.
+iptables -A "$CHAIN" -p udp -m udp ! --dport 53 \
+	-m hashlimit --hashlimit-name udpflood_dst \
+	--hashlimit-mode srcip,dstip,dstport --hashlimit-above 300/sec \
+	--hashlimit-burst 600 -j DROP
+# ICMP echo (ping) flood.
+iptables -A "$CHAIN" -p icmp --icmp-type echo-request \
+	-m hashlimit --hashlimit-name icmpflood \
+	--hashlimit-mode srcip --hashlimit-above 10/sec \
+	--hashlimit-burst 30 -j DROP
 iptables -A "$CHAIN" -j RETURN
 _hooked OUTPUT  || iptables -I OUTPUT  -j "$CHAIN"
 _hooked FORWARD || iptables -I FORWARD -j "$CHAIN"
@@ -428,6 +454,80 @@ ANTIFLOOD_EOF
   bash /etc/Plus-antiflood >/dev/null 2>&1
   if ! grep -q "/etc/Plus-antiflood" /etc/autostart 2>/dev/null; then
     echo "[[ -e /etc/Plus-antiflood ]] && bash /etc/Plus-antiflood >/dev/null 2>&1" >> /etc/autostart
+  fi
+
+  # Egress flood MONITOR (attributes an in-progress flood to the offending
+  # tunnel account, logs it, opt-in kills the abusing session). Same file the
+  # fresh install writes; kept identical and wired into the autostart tick.
+  cat > /etc/Plus-floodmon <<'FLOODMON_EOF'
+#!/bin/bash
+CHAIN=SSHPLUS_ANTIFLOOD
+LOG=/var/log/sshplus-flood.log
+STATE=/etc/SSHPlus/.floodmon.state
+CONF=/etc/SSHPlus/floodmon.conf
+SYN_SOCK_MIN=500
+DROP_DELTA_MIN=2000
+STRIKES_TO_ACT=2
+ACTION=log
+[[ -r $CONF ]] && . "$CONF" 2>/dev/null
+mkdir -p /etc/SSHPlus 2>/dev/null
+ts() { date '+%F %T %Z' 2>/dev/null; }
+now_drops=0
+if iptables -nvxL "$CHAIN" >/dev/null 2>&1; then
+	now_drops=$(iptables -nvxL "$CHAIN" 2>/dev/null \
+		| awk '/synflood_new|synflood_src|udpflood_dst|icmpflood/ {s+=$1} END{print s+0}')
+fi
+prev_drops=$(sed -n 's/^drops=//p' "$STATE" 2>/dev/null); prev_drops=${prev_drops:-0}
+if [ "$now_drops" -ge "$prev_drops" ] 2>/dev/null; then
+	delta=$(( now_drops - prev_drops ))
+else
+	delta=$now_drops
+fi
+top_line=$(ss -Htanp state syn-sent 2>/dev/null \
+	| grep -oE 'pid=[0-9]+' | sort | uniq -c | sort -rn | head -1)
+top_cnt=$(echo "$top_line" | awk '{print $1+0}')
+top_pid=$(echo "$top_line" | grep -oE '[0-9]+$')
+syn_total=$(ss -Htan state syn-sent 2>/dev/null | wc -l)
+top_dst=$(ss -Htan state syn-sent 2>/dev/null | awk '{print $NF}' \
+	| sort | uniq -c | sort -rn | head -1 | awk 'NF{print $1" x "$2}')
+[ -z "$top_dst" ] && top_dst="-"
+flood=0
+[ "${top_cnt:-0}"   -ge "$SYN_SOCK_MIN"   ] 2>/dev/null && flood=1
+[ "${syn_total:-0}" -ge "$SYN_SOCK_MIN"   ] 2>/dev/null && flood=1
+[ "${delta:-0}"     -ge "$DROP_DELTA_MIN" ] 2>/dev/null && flood=1
+strikes=$(sed -n 's/^strikes=//p' "$STATE" 2>/dev/null); strikes=${strikes:-0}
+if [ "$flood" -eq 1 ]; then strikes=$(( strikes + 1 )); else strikes=0; fi
+{ echo "drops=$now_drops"; echo "strikes=$strikes"; } > "$STATE" 2>/dev/null
+[ "$flood" -eq 0 ] && exit 0
+user="?"; comm="?"
+if [ -n "$top_pid" ] && [ -r "/proc/$top_pid/status" ]; then
+	comm=$(sed -n 's/^Name:[[:space:]]*//p' "/proc/$top_pid/status" 2>/dev/null)
+	uid=$(sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$top_pid/status" 2>/dev/null)
+	user=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1); user=${user:-uid:$uid}
+fi
+printf '%s FLOOD strikes=%s half_open=%s fw_drops_delta=%s victim="%s" offender="pid=%s comm=%s user=%s socks=%s"\n' \
+	"$(ts)" "$strikes" "$syn_total" "$delta" "$top_dst" "${top_pid:--}" "$comm" "$user" "${top_cnt:-0}" \
+	>> "$LOG" 2>/dev/null
+if [ "$ACTION" = kill ] && [ "$strikes" -ge "$STRIKES_TO_ACT" ] \
+	&& [ -n "$top_pid" ] && [ "$top_pid" -gt 1 ] 2>/dev/null; then
+	if { [ "$comm" = sshd ] || [ "$comm" = dropbear ]; } \
+		&& [ -n "$user" ] && [ "$user" != root ] && [ "$user" != "uid:0" ]; then
+		if kill -9 "$top_pid" 2>/dev/null; then
+			printf '%s ACTION killed tunnel session pid=%s user=%s socks=%s\n' \
+				"$(ts)" "$top_pid" "$user" "${top_cnt:-0}" >> "$LOG" 2>/dev/null
+		fi
+	else
+		printf '%s ACTION log-only: offender pid=%s comm=%s user=%s is shared/root; not killed\n' \
+			"$(ts)" "$top_pid" "$comm" "$user" >> "$LOG" 2>/dev/null
+	fi
+fi
+exit 0
+FLOODMON_EOF
+  chmod +x /etc/Plus-floodmon
+  [[ -e /etc/SSHPlus/floodmon.conf ]] || printf '# ACTION=log (default) or ACTION=kill to drop the abusing session.\nACTION=log\n' > /etc/SSHPlus/floodmon.conf
+  bash /etc/Plus-floodmon >/dev/null 2>&1
+  if ! grep -q "/etc/Plus-floodmon" /etc/autostart 2>/dev/null; then
+    echo "[[ -e /etc/Plus-floodmon ]] && bash /etc/Plus-floodmon >/dev/null 2>&1" >> /etc/autostart
   fi
 
   # Local DNS cache for boxes still pointed straight at public resolvers.
