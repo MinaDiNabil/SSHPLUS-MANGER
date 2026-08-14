@@ -396,14 +396,19 @@ CONNTRACK_EOF
   # --- Anti-flood guardrails for ALREADY-INSTALLED boxes --------------
   # Fresh installs get these from Install/list sections [9/9] (anti-flood
   # chain) and the dnsmasq block. Existing servers pick them up HERE on
-  # "force pull latest fixes" so the OVH DNS-flood / SMTP-relay
-  # suspension cannot recur. Both halves are idempotent and the chain is
-  # wired into the per-minute /etc/autostart tick so it self-heals.
+  # "force pull latest fixes" so the OVH DNS-flood / SMTP-relay / TCP-SYN
+  # (20Kpps-to-:25565) suspensions cannot recur. The rebuilt chain adds
+  # SYN/UDP/ICMP flood caps to any older DNS+SMTP-only chain still live.
+  # Both halves are idempotent and the chain is wired into the per-minute
+  # /etc/autostart tick so it self-heals.
   cat > /etc/Plus-antiflood <<'ANTIFLOOD_EOF'
 #!/bin/bash
 CHAIN=SSHPLUS_ANTIFLOOD
 _hooked() { iptables -C "$1" -j "$CHAIN" 2>/dev/null; }
-if iptables -nL "$CHAIN" >/dev/null 2>&1 && _hooked OUTPUT && _hooked FORWARD; then
+# Fast path also requires the SYN-flood rules; older DNS+SMTP-only chains
+# fall through here and get rebuilt with the TCP-SYN/UDP/ICMP guards.
+if iptables -nL "$CHAIN" >/dev/null 2>&1 && _hooked OUTPUT && _hooked FORWARD \
+	&& iptables -S "$CHAIN" 2>/dev/null | grep -q 'synflood_new'; then
 	exit 0
 fi
 if iptables -nL "$CHAIN" >/dev/null 2>&1; then
@@ -420,6 +425,27 @@ done
 for port in 25 465 587 2525; do
 	iptables -A "$CHAIN" -p tcp --dport "$port" -j DROP
 done
+# TCP SYN flood (OVH 20Kpps/:25565 suspension trigger): limit new-connection
+# attempts. Per (srcip,dstip,dstport) kills a single-victim DDoS; per srcip is
+# the spread-flood backstop. synflood_new is also the upgrade sentinel above.
+iptables -A "$CHAIN" -p tcp --syn \
+	-m hashlimit --hashlimit-name synflood_new \
+	--hashlimit-mode srcip,dstip,dstport --hashlimit-above 200/sec \
+	--hashlimit-burst 400 -j DROP
+iptables -A "$CHAIN" -p tcp --syn \
+	-m hashlimit --hashlimit-name synflood_src \
+	--hashlimit-mode srcip --hashlimit-above 500/sec \
+	--hashlimit-burst 1000 -j DROP
+# UDP flood via badvpn-udpgw: generous per-target cap keeps gaming/VoIP alive.
+iptables -A "$CHAIN" -p udp -m udp ! --dport 53 \
+	-m hashlimit --hashlimit-name udpflood_dst \
+	--hashlimit-mode srcip,dstip,dstport --hashlimit-above 300/sec \
+	--hashlimit-burst 600 -j DROP
+# ICMP echo (ping) flood.
+iptables -A "$CHAIN" -p icmp --icmp-type echo-request \
+	-m hashlimit --hashlimit-name icmpflood \
+	--hashlimit-mode srcip --hashlimit-above 10/sec \
+	--hashlimit-burst 30 -j DROP
 iptables -A "$CHAIN" -j RETURN
 _hooked OUTPUT  || iptables -I OUTPUT  -j "$CHAIN"
 _hooked FORWARD || iptables -I FORWARD -j "$CHAIN"
